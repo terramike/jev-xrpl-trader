@@ -13,10 +13,14 @@
     "web:dev": "cd web && bun run dev -- --port 3002",
     "web:build": "cd web && bun run build"
   },
-  "devDependencies": { "@types/bun": "latest", "typescript": "^5.8.3" },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.8.3"
+  },
   "dependencies": {
     "@ai-sdk/typesafe-ai": "^3.0.0",
     "ai": "^7.0.103",
+    "decimal.js": "^10.6.0",
     "xrpl": "^4.4.0",
     "zod": "^4.1.0"
   }

@@ -1,26 +1,27 @@
 import { readFileSync } from "node:fs";
+import { Decimal } from "./decimal";
 import { config } from "./config";
 import type { MarketDataSource } from "./market";
-import type { MarketEvent } from "./types";
+import { EVENT_VERSION, type MarketEvent } from "./types";
 
 export class SyntheticMarketDataSource implements MarketDataSource {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   private state: number;
   private ledger = 0;
-  private mid = 0.5;
+  private mid = new Decimal("0.5");
   constructor(private readonly seed: string, resumeLedger = 0) { this.state = hashSeed(seed) || 1; while (this.ledger < resumeLedger) this.advance(); }
   async start(callback: (event: MarketEvent) => Promise<void> | void) {
     const tick = async () => {
       if (this.stopped) return;
       const { spread, volume, executions } = this.advance();
       const event: MarketEvent = Object.freeze({
-        schemaVersion: 1, eventId: `synthetic:${this.seed}:${this.ledger}`, type: "market",
+        schemaVersion: EVENT_VERSION, eventId: `synthetic:${this.seed}:${this.ledger}`, type: "market",
         timestamp: 1_700_000_000_000 + this.ledger * 4_000, ledgerIndex: this.ledger,
         ledgerHash: hashText(`${this.seed}:${this.ledger}`), base: Object.freeze({ ...config.base }), quote: Object.freeze({ ...config.quote }),
-        bids: Object.freeze([{ price: this.mid - spread / 2, baseVolume: volume }, { price: this.mid - spread, baseVolume: volume * 1.5 }].map((level) => Object.freeze(level))),
-        asks: Object.freeze([{ price: this.mid + spread / 2, baseVolume: volume }, { price: this.mid + spread, baseVolume: volume * 1.5 }].map((level) => Object.freeze(level))),
-        executions: Object.freeze(executions.map((trade) => Object.freeze(trade))), source: "synthetic", syntheticSeed: this.seed,
+        bids: Object.freeze([{ price: this.mid.minus(spread.div(2)).toString(), baseVolume: volume.toString() }, { price: this.mid.minus(spread).toString(), baseVolume: volume.times("1.5").toString() }].map((level) => Object.freeze(level))),
+        asks: Object.freeze([{ price: this.mid.plus(spread.div(2)).toString(), baseVolume: volume.toString() }, { price: this.mid.plus(spread).toString(), baseVolume: volume.times("1.5").toString() }].map((level) => Object.freeze(level))),
+        executions: Object.freeze(executions.map((trade) => Object.freeze(trade))), unsupportedExecutions: Object.freeze([]), source: "synthetic", syntheticSeed: this.seed,
       });
       await callback(event);
       this.timer = setTimeout(() => void tick(), 4_000);
@@ -29,11 +30,11 @@ export class SyntheticMarketDataSource implements MarketDataSource {
   }
   private advance() {
     this.ledger++;
-    const move = (this.random() - 0.5) * 0.006;
-    this.mid = Math.max(0.005, this.mid * (1 + move));
-    const spread = this.mid * 0.0015;
-    const volume = 10 + this.random() * 15;
-    const executions = this.ledger % 3 === 0 ? (() => { const side = this.random() > 0.5 ? "buy" as const : "sell" as const; return [{ side, price: this.mid * (side === "buy" ? 1.005 : 0.995), baseVolume: 20 + this.random() * 40, sourceTx: `synthetic:${this.seed}:${this.ledger}` }]; })() : [];
+    const movePpm = Math.floor(this.random() * 6_000) - 3_000;
+    this.mid = Decimal.max("0.005", this.mid.times(new Decimal(1).plus(new Decimal(movePpm).div(1_000_000))));
+    const spread = this.mid.times("0.0015");
+    const volume = new Decimal(10).plus(new Decimal(Math.floor(this.random() * 1_000_000)).div(1_000_000).times(15));
+    const executions = this.ledger % 3 === 0 ? (() => { const side = this.random() > 0.5 ? "buy" as const : "sell" as const; return [{ side, price: this.mid.times(side === "buy" ? "1.005" : "0.995").toString(), baseVolume: new Decimal(20).plus(new Decimal(Math.floor(this.random() * 1_000_000)).div(1_000_000).times(40)).toString(), sourceTx: `synthetic:${this.seed}:${this.ledger}` }]; })() : [];
     return { spread, volume, executions };
   }
   private random() { this.state = (Math.imul(this.state, 1_664_525) + 1_013_904_223) >>> 0; return this.state / 0x1_0000_0000; }
@@ -47,7 +48,7 @@ export class ReplayMarketDataSource implements MarketDataSource {
   async start(callback: (event: MarketEvent) => Promise<void> | void) {
     const events = readFileSync(config.replayPath!, "utf8").split(/\r?\n/).filter(Boolean).map((line, index) => {
       const value = JSON.parse(line);
-      if (value.schemaVersion !== 1 || value.type !== "market" || !Number.isInteger(value.ledgerIndex)) throw new Error(`Replay line ${index + 1} is not a version 1 market event.`);
+      if (value.schemaVersion !== EVENT_VERSION || value.type !== "market" || !Number.isInteger(value.ledgerIndex)) throw new Error(`Replay line ${index + 1} is not a version ${EVENT_VERSION} market event.`);
       return deepFreeze(value as MarketEvent);
     });
     let i = events.findIndex((event) => event.ledgerIndex > this.resumeLedger);

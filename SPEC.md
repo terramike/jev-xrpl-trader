@@ -14,9 +14,9 @@ Each strategy has its own offers, inventory, P&L, risk state, and modeled costs.
 
 ## Market and execution model
 
-Market identity is the exact base and quote currency plus issuer for each issued currency. XRP is native and has no issuer. Data sources are Testnet, deterministic seeded synthetic, and recorded version 1 JSONL replay.
+Market identity is the exact base and quote currency plus issuer for each issued currency. XRP is native and has no issuer. Financial amounts and prices use decimal strings at event boundaries and decimal arithmetic internally; XRP costs are integer drops. Data sources are Testnet, deterministic seeded synthetic, and recorded version 3 JSONL replay.
 
-Testnet execution volume comes only from validated successful direct `OfferCreate` metadata affecting offers in the configured pair. AMM and routed executions are excluded. A virtual order activates one validated ledger after placement. A matching execution consumes configurable fixed queue ahead plus a fraction of displayed better-or-equal-price depth on that side before filling the remaining order, capped by validated executable volume, order remainder, and inventory limit.
+Testnet execution volume comes from validated successful `OfferCreate` and `Payment` metadata only when an affected offer has an explicit before/after delta in the configured pair. Transactions with no matching target-book offer delta are recorded as unsupported/unmatched; unsuccessful transactions, AMM paths, and routed volume without a direct target-book offer change do not contribute executable volume. A virtual order activates one validated ledger after placement. A matching execution consumes configurable fixed queue ahead plus a fraction of displayed better-or-equal-price depth on that side before filling the remaining order, capped by validated executable volume, order remainder, and inventory limit.
 
 ## Safety and state
 

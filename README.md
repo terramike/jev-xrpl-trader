@@ -10,7 +10,7 @@ This repository preserves the upstream MIT license and copyright notice. See [LI
 - The only executor in this build is `PaperExecutor`. No wallet, seed, private key, transaction builder, or signing adapter is loaded. Signing-related environment variables are rejected.
 - Use a dedicated `DATA_DIR` for a new session. Existing audit state is tied to the original source, market, and synthetic seed.
 - Every issued asset requires the exact XRPL currency code and issuer address. XRP is native and has no issuer.
-- Testnet direct-offer executions are inferred from validated `OfferCreate` metadata. AMM and routed volumes are omitted, making the fill model conservative. Partial fills are limited by eligible validated direct-offer volume, queue ahead, and remaining virtual offer size.
+- Testnet direct-offer executions are inferred from metadata in validated `OfferCreate` and `Payment` transactions. Unsupported payment executions without matching target-book offer deltas are explicitly omitted; AMM and non-target routed volumes are not estimated. XRPL metadata is treated as final only after the ledger is validated.
 - `stop` activates the persistent emergency stop and clears simulated offers. It leaves the daemon available for inspection. Press Ctrl+C in the foreground terminal to exit; the stop state is restored on the next start. `reset-stop` explicitly clears it.
 
 ## Configure and run
@@ -25,7 +25,9 @@ bun run trader report
 bun run trader stop
 ```
 
-Use `--source testnet` to connect to the approved Testnet WebSocket, or `--source replay --replay ./data/market.jsonl` for version 1 recorded market events. Synthetic source defaults to seed `jev-xrpl-paper-v1`; use `--synthetic-seed` (never a wallet seed) to choose another seed. It is stored in session metadata and the generated sequence resumes deterministically after a restart.
+Use `--source testnet` to connect to the approved Testnet WebSocket, or `--source replay --replay ./data/market.jsonl` for version 3 recorded market events. Financial amounts, prices, inventory, and P&L are serialized as decimal strings; XRP fees are stored as integer drops. Older journals and replays are rejected instead of being reinterpreted with lossy numeric state. Synthetic source defaults to seed `jev-xrpl-paper-v1`; use `--synthetic-seed` (never a wallet seed) to choose another seed. It is stored in session metadata and the generated sequence resumes deterministically after a restart.
+
+Version 3 changes the persisted event and financial amount representation. Start it with a new, empty `DATA_DIR` (for example, `DATA_DIR=data/paper-v3`); do not point it at a version 1 session. Version 1 and other earlier audit journals, checkpoints, and replay files are not migrated or deleted: the v3 reader rejects them with a schema-version error. Keep old data separately if it is needed for reference.
 
 The dashboard is a separate local web process:
 
@@ -43,11 +45,13 @@ The data API and SSE stream bind to `127.0.0.1:3000`; the authenticated admin en
 - **Jev-skewed baseline:** baseline quotes skewed by a typed direction/toxicity/volatility/confidence assessment. High toxicity, extreme volatility, or a Jev timeout withholds quotes for that strategy only.
 - **Static passive control:** deterministic quotes at twice the configured spread and half the configured size, without directional inputs.
 
-Each strategy has independent offers, signed inventory, realized and unrealized P&L, daily loss limits, and modeled costs. Offers activate one validated ledger after placement. Configurable queue ahead is a fixed base-unit amount plus a fraction of displayed volume at better or equal prices on that side. When a validated direct DEX execution crosses an offer, it consumes queue first and then fills up to the remaining executable volume. Modeled XRPL fees (XRP) and Jev inference cost (USD) are reported separately from quote-currency P&L; neither is an actual transaction cost in this paper-only build.
+Each strategy has independent offers, signed inventory, realized and unrealized P&L, daily loss limits, and modeled costs. Offers activate one validated ledger after placement and expire after `OFFER_LIFETIME_LEDGERS` eligible ledgers (default 1). Unchanged quotes retain their queue position. Replacing or canceling a resting offer records a modeled cancel cost; creating each offer records a modeled create cost. `MODELED_XRPL_FEE_DROPS` is charged per modeled create or cancel action. Configurable queue ahead is a fixed base-unit amount plus a fraction of displayed volume at better or equal prices on that side. A qualifying fill records its validated transaction hash, execution price, consumed queue volume, and qualification rule. Reports state these queue and lifetime assumptions. Modeled XRPL fees (XRP) and Jev inference cost (USD) are reported separately from quote-currency P&L; neither is an actual transaction cost in this paper-only build.
+
+The Testnet reader serializes ledger processing, requests each validated ledger with expanded transactions, and reconciles all transaction metadata before reading that ledger's book. A missing ledger, missing transaction metadata, failed book request, empty book, or crossed book pauses the feed rather than publishing a partial or out-of-order event. Payments whose metadata does not expose direct target-book offer deltas are excluded; `delivered_amount` is not treated as DEX volume.
 
 ## Local persistence and operations
 
-`DATA_DIR` contains versioned `audit.jsonl`, `checkpoint.json`, `session.json`, and `admin.token` files. Each accepted ledger is appended before dashboard publication. Recovery loads the newest compatible checkpoint and replays later audit events. Emergency-stop state is written to the audit stream and checkpoint immediately. A partial final JSONL line is ignored on recovery; malformed earlier records fail startup.
+`DATA_DIR` contains versioned `audit.jsonl`, `checkpoint.json`, `session.json`, and `admin.token` files. Each accepted ledger is appended before dashboard publication. Recovery loads the newest compatible checkpoint and replays later audit events. If the checkpoint is corrupt or incompatible, startup clearly warns and replays the intact, supported-version audit from its beginning; if that journal is unavailable, corrupt, or from an unsupported schema, startup fails with the checkpoint and journal issue. Emergency-stop state is written to the audit stream and checkpoint immediately. A partial final JSONL line is ignored on recovery; malformed earlier records fail startup.
 
 ```sh
 bun run trader status

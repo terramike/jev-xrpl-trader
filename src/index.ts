@@ -8,12 +8,12 @@ try {
   ]);
   const store = new AuditStore(config.dataDir);
   const base = JSON.stringify(config.base), quote = JSON.stringify(config.quote);
-  const assumptions = { spreadBps: config.spreadBps, quoteSize: config.quoteSize, maxInventory: config.maxInventory, maxDailyLoss: config.maxDailyLoss, queueAheadBase: config.queueAheadBase, queueAheadFraction: config.queueAheadFraction, modeledXrplFeeDrops: config.modeledXrplFeeDrops, jevUsdPerMTok: config.jevUsdPerMTok, model: config.model, jevModelId: config.jevModelId };
+  const assumptions = { spreadBps: config.spreadBps, quoteSize: config.quoteSize, maxInventory: config.maxInventory, maxDailyLoss: config.maxDailyLoss, queueAheadBase: config.queueAheadBase, queueAheadFraction: config.queueAheadFraction, offerLifetimeLedgers: config.offerLifetimeLedgers, modeledXrplFeeDrops: config.modeledXrplFeeDrops, jevUsdPerMTok: config.jevUsdPerMTok, model: config.model, jevModelId: config.jevModelId };
   const existing = store.loadSession();
   if (existing && (JSON.stringify(existing.base) !== base || JSON.stringify(existing.quote) !== quote || existing.source !== config.source || existing.seed !== (config.source === "synthetic" ? config.seed : undefined) || JSON.stringify(existing.assumptions) !== JSON.stringify(assumptions))) {
     throw new Error("Configured market/source/seed differs from the persisted session. Set a new DATA_DIR to start a separate paper session.");
   }
-  const session = existing ?? { schemaVersion: 1 as const, sessionId: crypto.randomUUID(), startedAt: Date.now(), source: config.source, ...(config.source === "synthetic" ? { seed: config.seed } : {}), base: config.base, quote: config.quote, assumptions };
+  const session = existing ?? { schemaVersion: 3 as const, sessionId: crypto.randomUUID(), startedAt: Date.now(), source: config.source, ...(config.source === "synthetic" ? { seed: config.seed } : {}), base: config.base, quote: config.quote, assumptions };
   store.saveSession(session);
   let server: ReturnType<typeof startServers> | undefined;
   const trader = new Trader(createModel(), store, (event) => server?.publish(event));

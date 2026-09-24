@@ -1,5 +1,10 @@
 import { z } from "zod";
 import { isValidClassicAddress } from "xrpl";
+import { Decimal } from "./decimal";
+
+const decimalSetting = (fallback: string, allowZero = false) => z.union([z.string(), z.number().finite()]).transform(String).refine((value) => {
+  try { const amount = new Decimal(value); return amount.isFinite() && (allowZero ? amount.gte(0) : amount.gt(0)); } catch { return false; }
+}, allowZero ? "Must be a non-negative decimal amount." : "Must be a positive decimal amount.").default(fallback);
 
 const currencySchema = z.object({ currency: z.string().min(3).max(40).regex(/^(?:[A-Za-z0-9]{3}|[A-Fa-f0-9]{40})$/), issuer: z.string().optional() }).strict().superRefine((value, ctx) => {
   if (value.currency.toUpperCase() === "XRP" && value.issuer) ctx.addIssue({ code: "custom", message: "Native XRP must not have an issuer." });
@@ -11,9 +16,10 @@ const configSchema = z.object({
   base: currencySchema, quote: currencySchema, seed: z.string().default("jev-xrpl-paper-v1"), replayPath: z.string().optional(),
   wsUrl: z.string().url().superRefine((value, ctx) => { const url = new URL(value); if (!['wss:', 'ws:'].includes(url.protocol) || url.username || url.password) ctx.addIssue({ code: "custom", message: "XRPL_WS_URL must be a credential-free WebSocket URL." }); if (!['s.altnet.rippletest.net', 'testnet.xrpl-labs.com'].includes(url.hostname.toLowerCase())) ctx.addIssue({ code: "custom", message: "XRPL_WS_URL must point to an approved XRPL Testnet endpoint." }); }).default("wss://s.altnet.rippletest.net:51233"), dataDir: z.string().default("data"),
   model: z.enum(["mock", "jev"]).default("mock"), jevModelId: z.string().default("jev-latest"), jevTimeoutMs: z.coerce.number().int().positive().default(1500),
-  jevUsdPerMTok: z.coerce.number().nonnegative().default(0.042), modeledXrplFeeDrops: z.coerce.number().nonnegative().default(10),
-  spreadBps: z.coerce.number().positive().default(30), quoteSize: z.coerce.number().positive().default(5), maxInventory: z.coerce.number().positive().default(50), maxDailyLoss: z.coerce.number().positive().default(25),
-  queueAheadBase: z.coerce.number().nonnegative().default(5), queueAheadFraction: z.coerce.number().min(0).max(1).default(0.5), checkpointEveryLedgers: z.coerce.number().int().positive().default(20),
+  jevUsdPerMTok: decimalSetting("0.042", true), modeledXrplFeeDrops: z.string().regex(/^\d+$/).default("10"),
+  spreadBps: decimalSetting("30"), quoteSize: decimalSetting("5"), maxInventory: decimalSetting("50"), maxDailyLoss: decimalSetting("25"),
+  offerLifetimeLedgers: z.coerce.number().int().positive().default(1),
+  queueAheadBase: decimalSetting("5", true), queueAheadFraction: z.coerce.number().min(0).max(1).default(0.5), checkpointEveryLedgers: z.coerce.number().int().positive().default(20),
   port: z.coerce.number().int().min(1024).max(65535).default(3000), adminPort: z.coerce.number().int().min(1024).max(65535).default(3001), dataHistory: z.coerce.number().int().positive().default(500),
 }).strict().superRefine((value, ctx) => {
   if (value.source === "replay" && !value.replayPath) ctx.addIssue({ code: "custom", path: ["replayPath"], message: "REPLAY_PATH is required when SOURCE=replay." });
@@ -29,6 +35,7 @@ export const config = parseConfig({
   seed: process.env.SYNTHETIC_SEED, replayPath: process.env.REPLAY_PATH, wsUrl: process.env.XRPL_WS_URL, dataDir: process.env.DATA_DIR,
   model: process.env.MODEL, jevModelId: process.env.JEV_MODEL_ID, jevTimeoutMs: process.env.JEV_TIMEOUT_MS, jevUsdPerMTok: process.env.JEV_USD_PER_MILLION_TOKENS,
   modeledXrplFeeDrops: process.env.MODELED_XRPL_FEE_DROPS, spreadBps: process.env.SPREAD_BPS, quoteSize: process.env.QUOTE_SIZE,
+  offerLifetimeLedgers: process.env.OFFER_LIFETIME_LEDGERS,
   maxInventory: process.env.MAX_INVENTORY, maxDailyLoss: process.env.MAX_DAILY_LOSS, queueAheadBase: process.env.QUEUE_AHEAD_BASE, queueAheadFraction: process.env.QUEUE_AHEAD_FRACTION,
   checkpointEveryLedgers: process.env.CHECKPOINT_EVERY_LEDGERS, port: process.env.PORT, adminPort: process.env.ADMIN_PORT, dataHistory: process.env.DATA_HISTORY,
 });

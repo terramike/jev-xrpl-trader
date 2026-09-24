@@ -1,0 +1,29 @@
+{
+  "fixtureSource": "XRPL Testnet validated ledger 21022834",
+  "hash": "FF0CD9981F89AA84E371F453088F95B8DB452A086FFEC4EAF79EA5C02097220F",
+  "validated": true,
+  "tx_json": {
+    "Account": "rEhuKJU2w5iUPCdf83rMBnyw1R5AJjZRjT",
+    "TransactionType": "Payment"
+  },
+  "meta": {
+    "TransactionResult": "tesSUCCESS",
+    "AffectedNodes": [
+      {
+        "DeletedNode": {
+          "LedgerEntryType": "Offer",
+          "LedgerIndex": "C5FCB9D5EF46E5B23F7D81BCFB62CAB99489D22732579011D193467507312E35",
+          "FinalFields": {
+            "Account": "rBG5vJkxbppTTAWkSCL5iym28HE7bFhZF4",
+            "TakerGets": { "currency": "03E93DC0CBC531CDDFC2E0BA0447ACF86D6E778C", "issuer": "rBG5vJkxbppTTAWkSCL5iym28HE7bFhZF4", "value": "0" },
+            "TakerPays": "0"
+          },
+          "PreviousFields": {
+            "TakerGets": { "currency": "03E93DC0CBC531CDDFC2E0BA0447ACF86D6E778C", "issuer": "rBG5vJkxbppTTAWkSCL5iym28HE7bFhZF4", "value": "300000" },
+            "TakerPays": "1"
+          }
+        }
+      }
+    ]
+  }
+}
