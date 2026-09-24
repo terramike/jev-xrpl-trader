@@ -64,7 +64,7 @@ export function transactionExecutionResult(input: any, base: Currency, quote: Cu
 }
 
 export class XrplMarketDataSource implements MarketDataSource {
-  private client = new Client(config.wsUrl, { connectionTimeout: 15_000 });
+  private client = new Client(config.network === "mainnet" ? config.mainnetWsUrl : config.wsUrl, { connectionTimeout: 15_000 });
   private callback: ((event: MarketEvent) => Promise<void> | void) | null = null;
   private lastLedger = 0;
   private closed = false;
@@ -109,7 +109,7 @@ export class XrplMarketDataSource implements MarketDataSource {
         schemaVersion: EVENT_VERSION, eventId: `xrpl:${hash}`, type: "market", timestamp: Date.now(), ledgerIndex: index, ledgerHash: hash,
         base: Object.freeze({ ...config.base }), quote: Object.freeze({ ...config.quote }),
         bids: Object.freeze(bids.map((level) => Object.freeze(level))), asks: Object.freeze(asks.map((level) => Object.freeze(level))),
-        executions: Object.freeze(executions.map((trade) => Object.freeze(trade))), unsupportedExecutions: Object.freeze(unsupportedExecutions.map((item) => Object.freeze(item))), source: "testnet",
+        executions: Object.freeze(executions.map((trade) => Object.freeze(trade))), unsupportedExecutions: Object.freeze(unsupportedExecutions.map((item) => Object.freeze(item))), source: config.network,
       });
       await this.callback(event);
       this.lastLedger = index;

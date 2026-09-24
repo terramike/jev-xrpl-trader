@@ -22,7 +22,7 @@ export interface MarketEvent {
   asks: readonly BookLevel[];
   executions: readonly ExecutableTrade[];
   unsupportedExecutions: readonly UnsupportedExecution[];
-  source: "testnet" | "synthetic" | "replay";
+  source: "testnet" | "mainnet" | "synthetic" | "replay";
   syntheticSeed?: string;
 }
 export interface MarketHistoryPoint { ledgerIndex: number; mid: Amount; buyFlow: Amount; sellFlow: Amount; spreadBps: Amount }
@@ -56,6 +56,7 @@ export interface CycleEvent {
   type: "cycle";
   timestamp: number;
   market: MarketEvent;
+  eligibleDirectOfferVolume: { buy: Amount; sell: Amount; total: Amount };
   strategies: Record<StrategyId, StrategySnapshot>;
   fills: Array<{ strategy: StrategyId; side: Side; price: Amount; baseVolume: Amount; ledgerIndex: number; sourceTx: string; executionPrice: Amount; queueVolumeConsumed: Amount; qualification: string }>;
   emergencyStop: boolean;
@@ -71,7 +72,7 @@ export interface Checkpoint {
   emergencyStop: boolean;
   strategies: Record<StrategyId, StrategyState>;
 }
-export interface SessionMeta { schemaVersion: typeof EVENT_VERSION; sessionId: string; startedAt: number; source: string; seed?: string; base: Currency; quote: Currency; assumptions: { spreadBps: Amount; quoteSize: Amount; maxInventory: Amount; maxDailyLoss: Amount; queueAheadBase: Amount; queueAheadFraction: number; offerLifetimeLedgers?: number; modeledXrplFeeDrops: Amount; jevUsdPerMTok: Amount; model: string; jevModelId: string } }
+export interface SessionMeta { schemaVersion: typeof EVENT_VERSION; sessionId: string; startedAt: number; source: string; network?: "testnet" | "mainnet"; seed?: string; base: Currency; quote: Currency; assumptions: { spreadBps: Amount; quoteSize: Amount; maxInventory: Amount; maxDailyLoss: Amount; queueAheadBase: Amount; queueAheadFraction: number; offerLifetimeLedgers?: number; modeledXrplFeeDrops: Amount; jevUsdPerMTok: Amount; model: string; jevModelId: string } }
 
 export interface StrategyContext {
   market: MarketEvent;

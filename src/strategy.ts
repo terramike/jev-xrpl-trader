@@ -10,16 +10,16 @@ abstract class PassiveStrategy implements Strategy {
   protected abstract parameters(context: StrategyContext): QuoteParameters | null;
   decide(context: StrategyContext): Offer[] {
     const { state, market, risk } = context;
-    if (context.emergencyStop) return this.cancel(state, "persistent emergency stop");
-    if (state.risk.stopped) return this.cancel(state, state.risk.reason ?? "risk stop");
+    if (context.emergencyStop) return this.cancel(state, "persistent emergency stop", context.assessment);
+    if (state.risk.stopped) return this.cancel(state, state.risk.reason ?? "risk stop", context.assessment);
     const bestBid = market.bids[0]?.price, bestAsk = market.asks[0]?.price;
-    if (!bestBid || !bestAsk || d(bestBid).gte(bestAsk)) return this.cancel(state, "book unavailable or crossed");
+    if (!bestBid || !bestAsk || d(bestBid).gte(bestAsk)) return this.cancel(state, "book unavailable or crossed", context.assessment);
     const params = this.parameters(context);
-    if (!params) return this.cancel(state, "strategy withheld quotes");
+    if (!params) return this.cancel(state, this.withheldReason(context), context.assessment);
     const half = params.center.times(params.spreadBps).div(20_000);
     const bid = Decimal.min(d(bestBid), params.center.minus(half));
     const ask = Decimal.max(d(bestAsk), params.center.plus(half));
-    if (!bid.gt(0) || !ask.gt(bid)) return this.cancel(state, "quote would cross or be invalid");
+    if (!bid.gt(0) || !ask.gt(bid)) return this.cancel(state, "quote would cross or be invalid", context.assessment);
     const inventory = d(state.inventory), maxInventory = d(risk.maxInventory);
     const bidCapacity = Decimal.max(0, maxInventory.minus(inventory));
     const askCapacity = Decimal.max(0, maxInventory.plus(inventory));
@@ -29,7 +29,16 @@ abstract class PassiveStrategy implements Strategy {
     state.lastDecision = { assessment: context.assessment, quotes: structuredClone(quotes), reason: params.reason };
     return quotes;
   }
-  protected cancel(state: StrategyState, reason: string) { state.lastDecision = { assessment: null, quotes: [], reason }; return []; }
+  protected cancel(state: StrategyState, reason: string, assessment: StrategyContext["assessment"] = null) { state.lastDecision = { assessment, quotes: [], reason }; return []; }
+  private withheldReason(context: StrategyContext) {
+    if (this.id !== "jev") return "strategy withheld quotes";
+    if (!context.assessment) return "Jev assessment unavailable; quote withheld";
+    const gates = [
+      ...(context.assessment.toxicity === "high" ? ["high toxicity"] : []),
+      ...(context.assessment.volatility === "extreme" ? ["extreme volatility"] : []),
+    ];
+    return gates.length ? `Jev withheld quotes: ${gates.join(" and ")}` : "Jev assessment did not produce a quote";
+  }
   private offer(market: MarketEvent, risk: StrategyContext["risk"], side: Side, price: Decimal, size: Decimal): Offer {
     const queueLevels = side === "buy" ? market.bids.filter((item) => d(item.price).gte(price)) : market.asks.filter((item) => d(item.price).lte(price));
     const visibleAhead = queueLevels.reduce((sum, item) => sum.plus(item.baseVolume), new Decimal(0));

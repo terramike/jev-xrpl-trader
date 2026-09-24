@@ -1,6 +1,6 @@
 import { Decimal } from "./decimal";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import type { Checkpoint, ControlEvent, CycleEvent, SessionMeta, StrategyId, StrategyState } from "./types";
 import { EVENT_VERSION } from "./types";
 
@@ -8,6 +8,17 @@ export type AuditEvent = CycleEvent | ControlEvent;
 export const STRATEGY_IDS: StrategyId[] = ["baseline", "jev", "control"];
 export function initialStrategyState(): StrategyState { return { offers: [], inventory: "0", averageEntryPrice: "0", realizedPnl: "0", xrplFeeDrops: "0", modeledOfferCreates: 0, modeledOfferCancels: 0, jevCostUsd: "0", jevCalls: 0, jevTimeouts: 0, jevLatencyTotalMs: 0, jevInputTokens: 0, risk: { stopped: false, dailyRealizedLoss: "0", reason: null, day: "" }, decisions: 0, fills: 0, lastDecision: { assessment: null, quotes: [], reason: "starting" } }; }
 export function initialStrategies(): Record<StrategyId, StrategyState> { return { baseline: initialStrategyState(), jev: initialStrategyState(), control: initialStrategyState() }; }
+
+export function assertFreshMainnetDataDir(dataDir: string) {
+  if (resolve(dataDir) === resolve("data")) throw new Error("Mainnet paper sessions require an explicitly selected fresh DATA_DIR, separate from the default Testnet data directory.");
+  if (!existsSync(dataDir)) return;
+  const entries = readdirSync(dataDir);
+  if (!entries.length) return;
+  let session: SessionMeta | null = null;
+  try { session = JSON.parse(readFileSync(join(dataDir, "session.json"), "utf8")); } catch { /* A populated directory without a valid session cannot be treated as fresh. */ }
+  if (session?.network === "mainnet" && session.source === "mainnet") return;
+  throw new Error("Mainnet paper sessions require a fresh DATA_DIR. This directory already contains data from another or unidentified session; choose a new empty directory.");
+}
 
 export class AuditStore {
   readonly auditPath: string;

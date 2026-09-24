@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,7 +14,7 @@ process.env.QUOTE_ISSUER = "rrrrrrrrrrrrrrrrrrrrBZbvji";
 process.env.PORT = String(31_000 + process.pid % 2_000);
 process.env.ADMIN_PORT = String(33_000 + process.pid % 2_000);
 
-const [{ config, parseConfig }, { SyntheticMarketDataSource }, { PaperExecutor }, { initialStrategyState, initialStrategies, AuditStore }, { Trader }, { startServers }, { executionsFromTransaction, transactionExecutionResult }] = await Promise.all([
+const [{ config, parseConfig, assertNoSigningCredentials }, { SyntheticMarketDataSource }, { PaperExecutor }, { initialStrategyState, initialStrategies, AuditStore, assertFreshMainnetDataDir }, { Trader }, { startServers }, { executionsFromTransaction, transactionExecutionResult }] = await Promise.all([
   import("../src/config"), import("../src/sources"), import("../src/execution/paper"), import("../src/storage"), import("../src/trader"), import("../src/server"), import("../src/market"),
 ]);
 
@@ -26,7 +26,39 @@ function marketEvent(ledgerIndex: number, executions: any[] = [], source: "synth
 }
 
 describe("paper configuration", () => {
-  test("accepts the explicit paper/Testnet configuration", () => expect(config.mode).toBe("paper"));
+  test("preserves the existing paper/Testnet defaults", () => {
+    expect(config.mode).toBe("paper");
+    expect(config.network).toBe("testnet");
+    const testnet = parseConfig({ ...config, source: undefined, wsUrl: undefined });
+    expect(testnet.source).toBe("testnet");
+    expect(testnet.wsUrl).toBe("wss://s.altnet.rippletest.net:51233");
+  });
+  test("selects Mainnet only with explicit paper network and source, and keeps Jev mock-only", () => {
+    const mainnet = parseConfig({ ...config, network: "mainnet", source: "mainnet", dataDir: "data/mainnet-shadow-test" });
+    expect(mainnet.network).toBe("mainnet");
+    expect(mainnet.source).toBe("mainnet");
+    expect(mainnet.mainnetWsUrl).toBe("wss://xrplcluster.com/");
+    expect(() => parseConfig({ ...config, network: "mainnet" })).toThrow();
+    expect(() => parseConfig({ ...config, source: "mainnet" })).toThrow();
+    expect(() => parseConfig({ ...mainnet, model: "jev" })).toThrow();
+    expect(() => parseConfig({ ...mainnet, mainnetWsUrl: "wss://s.altnet.rippletest.net:51233" })).toThrow();
+    expect(() => parseConfig({ ...mainnet, mainnetWsUrl: "ws://xrplcluster.com/" })).toThrow();
+    expect(() => parseConfig({ ...config, wsUrl: "wss://s1.ripple.com/" })).toThrow();
+  });
+  test("requires a fresh Mainnet DATA_DIR and refuses Testnet data reuse", () => {
+    const fresh = join(tempDir(), "mainnet-fresh");
+    mkdirSync(fresh);
+    expect(() => assertFreshMainnetDataDir(fresh)).not.toThrow();
+    expect(() => assertFreshMainnetDataDir("data")).toThrow("fresh DATA_DIR");
+    const occupied = join(tempDir(), "occupied");
+    mkdirSync(occupied);
+    writeFileSync(join(occupied, "session.json"), JSON.stringify({ network: "testnet", source: "testnet" }));
+    expect(() => assertFreshMainnetDataDir(occupied)).toThrow("choose a new empty directory");
+    const resumable = join(tempDir(), "mainnet-resume");
+    mkdirSync(resumable);
+    writeFileSync(join(resumable, "session.json"), JSON.stringify({ network: "mainnet", source: "mainnet" }));
+    expect(() => assertFreshMainnetDataDir(resumable)).not.toThrow();
+  });
   test("rejects live, Mainnet, missing issuer, identical pair, and replay without a file", () => {
     expect(() => parseConfig({ ...config, mode: "live" })).toThrow();
     expect(() => parseConfig({ ...config, network: "mainnet" })).toThrow();
@@ -36,6 +68,7 @@ describe("paper configuration", () => {
     expect(() => parseConfig({ ...config, wsUrl: "wss://xrplcluster.com" })).toThrow();
     expect(() => parseConfig({ ...config, signer: { type: "unknown" } })).toThrow();
     expect(() => parseConfig({ ...config, modeledXrplFeeDrops: "0.1" })).toThrow();
+    expect(() => assertNoSigningCredentials({ XRPL_SEED: "dummy-test-value" })).toThrow("paper-only");
   });
   test("keeps configured asset precision instead of coercing amounts through JavaScript number", () => {
     const precise = parseConfig({ ...config, quoteSize: "0.000000000000000001", maxInventory: "999999999999999999.123456789012345678" });
@@ -209,6 +242,37 @@ describe("recovery, risk and administration", () => {
     expect(report.find((strategy) => strategy.id === "baseline")!.openOffers).toBe(2);
     expect(report.find((strategy) => strategy.id === "control")!.openOffers).toBe(2);
     expect(report.find((strategy) => strategy.id === "jev")!.openOffers).toBe(0);
+    expect(trader.status.strategies.find((strategy) => strategy.id === "jev")!.state.lastDecision.reason).toBe("Jev assessment unavailable; quote withheld");
+  });
+  test("records the Jev assessment and exact abstention gates in the per-ledger quote decision", async () => {
+    const assessment = { direction: "bearish" as const, toxicity: "high" as const, volatility: "extreme" as const, confidence: 1, latencyMs: 0, inputTokens: 0 };
+    const store = new AuditStore(tempDir());
+    const trader = new Trader({ assess: async () => assessment }, store);
+    await trader.onMarket(marketEvent(1));
+    const jev = trader.status.strategies.find((strategy) => strategy.id === "jev")!;
+    expect(jev.state.lastDecision.assessment).toEqual(assessment);
+    expect(jev.state.lastDecision.reason).toBe("Jev withheld quotes: high toxicity and extreme volatility");
+    expect(jev.state.lastDecision.quotes).toHaveLength(0);
+    const cycle = JSON.parse(readFileSync(store.auditPath, "utf8").trim().split(/\r?\n/).at(-1)!);
+    expect(cycle.eligibleDirectOfferVolume).toEqual({ buy: "0", sell: "0", total: "0" });
+    expect(cycle.strategies.jev.state.lastDecision.assessment).toEqual(assessment);
+  });
+  test("records eligible volume, quote decisions, unsupported cases and detailed fill evidence in each cycle", async () => {
+    const store = new AuditStore(tempDir()), strategies = initialStrategies();
+    strategies.baseline.offers = [{ id: "resting", side: "buy", price: "0.5", remaining: "2", queueRemaining: "0", placedLedger: 1, eligibleLedger: 2, expiresLedger: 5 }];
+    store.append({ schemaVersion: 3, eventId: "control:prior", type: "control", timestamp: 1, action: "reset-stop", emergencyStop: false, strategies });
+    store.checkpoint({ schemaVersion: 3, lastEventId: "control:prior", lastLedgerIndex: 1, lastMid: "0.5", emergencyStop: false, strategies });
+    const trader = new Trader({ assess: async () => ({ direction: "neutral", toxicity: "low", volatility: "calm", confidence: 0.5, latencyMs: 1, inputTokens: 10 }) }, store);
+    const event = marketEvent(2, [{ side: "sell", price: "0.49", baseVolume: "3", sourceTx: "validated-source-tx" }]);
+    const market = { ...event, unsupportedExecutions: [{ sourceTx: "unmatched-tx", transactionType: "Payment", reason: "payment-without-direct-target-offer-delta" }] };
+    await trader.onMarket(market);
+    const cycle = JSON.parse(readFileSync(store.auditPath, "utf8").trim().split(/\r?\n/).at(-1)!);
+    expect(cycle.eligibleDirectOfferVolume).toEqual({ buy: "0", sell: "3", total: "3" });
+    expect(cycle.market.unsupportedExecutions[0].sourceTx).toBe("unmatched-tx");
+    expect(cycle.strategies.baseline.state.lastDecision.quotes.length).toBeGreaterThan(0);
+    expect(cycle.fills).toHaveLength(1);
+    expect(cycle.fills[0]).toMatchObject({ side: "buy", baseVolume: "2", sourceTx: "validated-source-tx", executionPrice: "0.49", queueVolumeConsumed: "0" });
+    expect(cycle.fills[0].qualification).toContain("validated direct offer execution");
   });
   test("admin operations require the local bearer token and stop persists", async () => {
     const dir = tempDir(), store = new AuditStore(dir);

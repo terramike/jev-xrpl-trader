@@ -13,7 +13,7 @@ export default function Page() {
   const labels = { baseline: "Deterministic baseline", jev: "Jev-skewed baseline", control: "Static passive control" };
   return <main className={styles.shell}>
     <header className={styles.header}>
-      <div><div className={styles.eyebrow}>XRPL PAPER TRADER · TESTNET ONLY</div><h1>Jev XRPL Trader</h1><div className={styles.pair}>{latest ? `${latest.market.base.currency}/${latest.market.quote.currency}` : "Configured XRPL pair"} <span>ledger {latest?.market.ledgerIndex ?? "—"}</span></div><div className={styles.issuer}>Issuer identity: {latest?.market.base.issuer ? `${latest.market.base.currency} ${latest.market.base.issuer}` : "XRP (native)"} · {latest?.market.quote.issuer ? `${latest.market.quote.currency} ${latest.market.quote.issuer}` : latest?.market.quote.currency ?? "quote pending"}</div></div>
+      <div><div className={styles.eyebrow}>XRPL PAPER TRADER · {(latest?.market.source ?? "waiting").toUpperCase()}</div><h1>Jev XRPL Trader</h1><div className={styles.pair}>{latest ? `${latest.market.base.currency}/${latest.market.quote.currency}` : "Configured XRPL pair"} <span>ledger {latest?.market.ledgerIndex ?? "—"}</span></div><div className={styles.issuer}>Issuer identity: {latest?.market.base.issuer ? `${latest.market.base.currency} ${latest.market.base.issuer}` : "XRP (native)"} · {latest?.market.quote.issuer ? `${latest.market.quote.currency} ${latest.market.quote.issuer}` : latest?.market.quote.currency ?? "quote pending"}</div></div>
       <div className={styles.status}><span className={feed.connection === "live" ? styles.live : styles.offline} />API {feed.connection}<strong>Market {feed.marketConnection}</strong><strong>{latest?.emergencyStop ? "EMERGENCY STOP ACTIVE" : "Paper only · no transactions"}</strong></div>
     </header>
     <section className={styles.market}>
@@ -21,6 +21,7 @@ export default function Page() {
       <div><small>Best bid</small><strong>{latest ? qty(latest.market.bids[0]!.price) : "—"}</strong></div>
       <div><small>Best ask</small><strong>{latest ? qty(latest.market.asks[0]!.price) : "—"}</strong></div>
       <div><small>Validated executions</small><strong>{latest?.market.executions.length ?? 0}</strong></div>
+      <div><small>Eligible direct volume</small><strong>{qty(latest?.eligibleDirectOfferVolume?.total ?? latest?.market.executions.reduce((sum, trade) => sum + Number(trade.baseVolume), 0) ?? "0")}</strong></div>
       <div><small>Unsupported executions</small><strong>{latest?.market.unsupportedExecutions.length ?? 0}</strong></div>
       <div><small>Source</small><strong>{latest?.market.source ?? "waiting"}</strong></div>
     </section>
@@ -37,7 +38,7 @@ export default function Page() {
         </article>;
       })}
     </section>
-    <section className={styles.tape}><div className={styles.tapeHead}><h2>Ledger audit stream</h2><span>{feed.events.length} events in view</span></div>{feed.events.slice(-30).reverse().map((event) => <div className={styles.row} key={event.eventId}><time>{new Date(event.timestamp).toLocaleTimeString()}</time><b>#{event.market.ledgerIndex}</b><span>{event.market.ledgerHash.slice(0, 12)}</span><span>{event.market.executions.length} direct DEX executions · {event.market.unsupportedExecutions.length} unsupported</span><span>{Object.entries(event.strategies).map(([id, s]) => `${id}: ${s.state.fills} fills`).join(" · ")}</span><span>{event.emergencyStop ? "STOPPED" : "active"}</span></div>)}{feed.events.length === 0 && <p className={styles.waiting}>Waiting for a versioned market event…</p>}</section>
+    <section className={styles.tape}><div className={styles.tapeHead}><h2>Ledger audit stream</h2><span>{feed.events.length} events in view</span></div>{feed.events.slice(-30).reverse().map((event) => <div className={styles.row} key={event.eventId}><time>{new Date(event.timestamp).toLocaleTimeString()}</time><b>#{event.market.ledgerIndex}</b><span>{event.market.ledgerHash.slice(0, 12)}</span><span>{qty(event.eligibleDirectOfferVolume?.total ?? event.market.executions.reduce((sum, trade) => sum + Number(trade.baseVolume), 0))} eligible base volume · {event.market.unsupportedExecutions.length} unsupported</span><span>{Object.entries(event.strategies).map(([id, s]) => `${id}: ${s.state.fills} fills`).join(" · ")}</span><span>{event.fills?.map((fill) => `${fill.strategy} ${fill.side} ${qty(fill.baseVolume)} @ ${qty(fill.executionPrice)} · tx ${fill.sourceTx.slice(0, 10)}`).join("; ") || "no fill evidence"}</span><span>{event.emergencyStop ? "STOPPED" : "active"}</span></div>)}{feed.events.length === 0 && <p className={styles.waiting}>Waiting for a versioned market event…</p>}</section>
     <footer className={styles.footer}>Paper simulation only. Offers are virtual. XRPL modeled fees and Jev inference costs are estimates reported separately.</footer>
   </main>;
 }
