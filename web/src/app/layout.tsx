@@ -1,35 +1,20 @@
 import type { Metadata, Viewport } from "next";
-import { Geist_Mono, Inter } from "next/font/google";
 import "./globals.css";
 
-const inter = Inter({
-  subsets: ["latin"],
-  weight: ["300", "400", "500", "600"],
-  variable: "--font-inter",
-  display: "swap",
-});
-
-const geistMono = Geist_Mono({
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-  variable: "--font-geist-mono",
-  display: "swap",
-});
-
 export const metadata: Metadata = {
-  title: "Jev Trader",
-  description: "One AI trade decision every Monad block.",
+  title: "Jev XRPL Trader — Paper Mode",
+  description: "Paper-only XRPL strategy comparison dashboard.",
 };
 
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  themeColor: "#F0EEE9",
+  themeColor: "#090909",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${inter.variable} ${geistMono.variable}`}>
+    <html lang="en">
       <body>{children}</body>
     </html>
   );

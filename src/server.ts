@@ -1,45 +1,54 @@
+import { writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { join } from "node:path";
 import { config } from "./config";
-import type { Fill, Quote } from "./market";
-import type { BlockEvent } from "./trader";
+import type { Trader } from "./trader";
+import type { ControlEvent, CycleEvent } from "./types";
 
-interface Meta { model: string; wallet: string | null; dryRun: boolean; market: string; startedAt: number }
+const json = (value: unknown, status = 200, extraHeaders: Record<string, string> = {}) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extraHeaders } });
+const enc = new TextEncoder();
 
-const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "*" };
-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...CORS, "content-type": "application/json" } });
-
-/** GET / snapshot · GET /history recent blocks · GET /events SSE stream (`snapshot`, `block`, `quote`, `fill`, `ping`) */
-export function startServer(meta: Meta, history: () => BlockEvent[]) {
+export function startServers(trader: Trader, meta: Record<string, unknown>, tokenPath: string) {
+  const allowedOrigins = new Set(["http://localhost:3002", "http://127.0.0.1:3002"]);
   const clients = new Set<ReadableStreamDefaultController<Uint8Array>>();
-  const enc = new TextEncoder();
-  const send = (c: ReadableStreamDefaultController<Uint8Array>, type: string, data: unknown) => {
-    try { c.enqueue(enc.encode(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`)); } catch { clients.delete(c); }
+  const push = (event: CycleEvent | ControlEvent) => {
+    const payload = enc.encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+    for (const client of clients) { try { client.enqueue(payload); } catch { clients.delete(client); } }
   };
-  setInterval(() => clients.forEach((c) => send(c, "ping", Date.now())), 15_000);
+  const token = tokenFor(tokenPath);
+  const publicServer = Bun.serve({ hostname: "127.0.0.1", port: config.port, fetch(req) {
+    const { pathname } = new URL(req.url);
+    const origin = req.headers.get("origin");
+    const cors: Record<string, string> = origin && allowedOrigins.has(origin) ? { "access-control-allow-origin": origin, "vary": "origin" } : {};
+    if (req.method === "OPTIONS") return new Response(null, { headers: { ...cors, "access-control-allow-methods": "GET, OPTIONS", "access-control-allow-headers": "content-type" } });
+    if (req.method === "GET" && ["/", "/status"].includes(pathname)) return json({ ...trader.status, ...meta }, 200, cors);
+    if (req.method === "GET" && pathname === "/report") return json(trader.report, 200, cors);
+    if (req.method === "GET" && pathname === "/history") return json(trader.history, 200, cors);
+    if (req.method === "GET" && pathname === "/events") {
+      const stream = new ReadableStream<Uint8Array>({ start(controller) { clients.add(controller); controller.enqueue(enc.encode(`event: snapshot\ndata: ${JSON.stringify({ ...trader.status, ...meta, history: trader.history })}\n\n`)); }, cancel(controller) { clients.delete(controller); } });
+      return new Response(stream, { headers: { ...cors, "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
+    }
+    return json({ error: "not found" }, 404, cors);
+  } });
+  const adminServer = Bun.serve({ hostname: "127.0.0.1", port: config.adminPort, fetch(req) {
+    const { pathname } = new URL(req.url);
+    if (req.headers.get("host") !== `127.0.0.1:${config.adminPort}`) return json({ error: "loopback host required" }, 403);
+    if (req.headers.get("authorization") !== `Bearer ${token}`) return json({ error: "unauthorized" }, 401);
+    if (req.method === "GET" && pathname === "/status") return json(trader.status);
+    if (req.method === "GET" && pathname === "/report") return json(trader.report);
+    const actions: Record<string, ControlEvent["action"]> = { "/admin/stop": "stop", "/admin/cancel-all": "cancel-all", "/admin/reset-stop": "reset-stop" };
+    if (req.method === "POST" && actions[pathname]) return json(trader.control(actions[pathname]!));
+    return json({ error: "not found" }, 404);
+  } });
+  const heartbeat = setInterval(() => {
+    const bytes = enc.encode(`event: ping\ndata: ${JSON.stringify({ timestamp: Date.now(), marketConnection: trader.status.marketConnection })}\n\n`);
+    for (const client of clients) { try { client.enqueue(bytes); } catch { clients.delete(client); } }
+  }, 15_000);
+  return { token, publish: push, close: async () => { clearInterval(heartbeat); clients.clear(); await publicServer.stop(true); await adminServer.stop(true); } };
+}
 
-  Bun.serve({
-    port: config.port,
-    fetch(req) {
-      const { pathname } = new URL(req.url);
-      if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
-      if (pathname === "/") return json({ ...meta, latest: history().at(-1) ?? null });
-      if (pathname === "/history") return json(history());
-      if (pathname === "/events") {
-        const stream = new ReadableStream<Uint8Array>({
-          start(c) { clients.add(c); send(c, "snapshot", { ...meta, history: history() }); },
-          cancel(c) { clients.delete(c); },
-        });
-        return new Response(stream, { headers: { ...CORS, "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" } });
-      }
-      return json({ error: "not found" }, 404);
-    },
-  });
-
-  const broadcast = (type: string, data: unknown) => clients.forEach((c) => send(c, type, data));
-  return {
-    broadcast: (e: BlockEvent) => broadcast("block", e),
-    /** A quote's receipt landed: placed (with order id) or reverted, and the real gas. */
-    broadcastQuote: (block: number, quote: Quote) => broadcast("quote", { block, quote }),
-    /** A taker hit one of our resting orders in `block`. */
-    broadcastFill: (block: number, fill: Fill) => broadcast("fill", { block, fill }),
-  };
+function tokenFor(path: string) {
+  const token = randomBytes(32).toString("base64url");
+  writeFileSync(path, token, { encoding: "utf8", mode: 0o600, flag: "w" });
+  return token;
 }

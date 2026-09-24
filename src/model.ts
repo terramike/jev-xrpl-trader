@@ -1,107 +1,67 @@
 import { experimental_evaluate } from "ai";
 import { typeSafeAi } from "@ai-sdk/typesafe-ai";
 import { config } from "./config";
+import type { JevAssessment, MarketEvent } from "./types";
 
-/** Models answer buy or sell. `hold` only appears on late blocks (no decision was made). */
-export type Action = "buy" | "sell" | "hold";
-
-/** What the model sees. Compact, relative, human-readable. */
-export interface TradeState {
-  market: "MON-USDC";
-  block: number;
-  horizonBlocks: number; // the question is about the move over this many blocks
-  blockMs: number;
-  mid: number;
-  spreadBps: number;
-  bookImbalance: number; // -1 (all asks) .. 1 (all bids), within 1% of mid
-  /** Cumulative resting MON within 10/25/50 bps of mid, per side. */
-  depth: { [band: string]: { bid: number; ask: number } };
-  /** Top 5 levels each side, best first, as "price x size". */
-  book: { bids: string[]; asks: string[] };
-  returnsBps: { last1: number; last5: number; last20: number; last100: number };
-  recentMids: string; // oldest..newest, sampled every 5 blocks over the horizon, space separated
-  /** Taker prints over the last `horizonBlocks`. cvdMon = taker buy volume - taker sell volume. */
-  trades: { count: number; buyMon: number; sellMon: number; cvdMon: number; vwap: number | null; lastPrice: number | null; lastSide: "buy" | "sell" | null };
-  recentTrades: string[]; // newest last, "block side size @ price"
-  allowed: { buy: boolean; sell: boolean };
-}
-
-export interface Decision {
-  action: Action;
-  probabilities: Record<Action, number>;
-  upIn10: number;
-  latencyMs: number;
-  inputTokens: number;
-}
-
-export interface Model {
-  readonly name: string;
-  decide(state: TradeState): Promise<Decision>;
-}
+export interface DecisionModel { assess(event: MarketEvent): Promise<JevAssessment> }
 
 const QUESTIONS = {
-  direction: {
-    type: "choice",
-    instructions: {
-      question: "Will MON be higher or lower than the current mid after `horizonBlocks` more blocks?",
-      goal: "Trade MON-USDC on Kuru. Blocks are ~300ms; `horizonBlocks` (~30 s) is the horizon. A decision is made every few blocks and held until the next one. The trade crosses the spread (`spreadBps`), so the move must beat that cost.",
-      timing: "The order executes as an immediate-or-cancel market order in the next block.",
-      inputs: "Taker flow is the strongest signal: `trades.cvdMon` (taker buys minus taker sells over the horizon), `trades.lastSide` and `recentTrades` show who is hitting the book. `depth` and `book` show resting liquidity per side at several distances from mid; thin depth on one side means price moves easily that way. `returnsBps` and `recentMids` show the path over the horizon. If `allowed.buy` is false the trade will be a sell regardless, and vice versa.",
-    },
-    criteria: {
-      buy: "Buy MON now: mid more likely to be higher after `horizonBlocks` blocks, by more than the spread.",
-      sell: "Sell MON now: mid more likely to be lower after `horizonBlocks` blocks, by more than the spread.",
-    },
-  },
+  direction: { type: "choice", instructions: { question: "Over the next several validated ledgers, is price direction bullish, bearish, or neutral?", goal: "Classify direction only for passive quoting. Do not propose a transaction, price, or size.", inputs: "Use the exact configured XRP/issued-currency pair, book imbalance, spread, validated direct offer executions, and current book levels." }, criteria: { bullish: "Evidence favors a higher midpoint.", bearish: "Evidence favors a lower midpoint.", neutral: "Evidence does not favor either direction." } },
+  toxicity: { type: "choice", instructions: { question: "How toxic is this market for a passive quote?", goal: "High toxicity means market makers should withdraw.", inputs: "Consider spread, book depth, and validated direct-offer execution flow." }, criteria: { low: "Conditions appear orderly.", medium: "Conditions are mixed or less stable.", high: "Adverse selection risk appears elevated." } },
+  volatility: { type: "choice", instructions: { question: "Is current volatility calm, normal, or extreme?", goal: "Classify current market volatility for passive quote sizing.", inputs: "Compare the spread and recent price movement in the provided snapshot." }, criteria: { calm: "Price movement is subdued.", normal: "Price movement is ordinary.", extreme: "Price movement is unusually large or unstable." } },
 } as const;
 
-/** Real Jev via the AI SDK. Swap-in is the MODEL env var. */
-export class JevModel implements Model {
-  readonly name = config.jevModelId;
-  private model = typeSafeAi.evaluationModel(config.jevModelId);
+export class JevModel implements DecisionModel {
+  private readonly model = typeSafeAi.evaluationModel(config.jevModelId);
+  async assess(event: MarketEvent): Promise<JevAssessment> {
+    const started = performance.now();
+    const result = await experimental_evaluate({
+      model: this.model,
+      state: {
+        ledger: event.ledgerIndex,
+        base: event.base,
+        quote: event.quote,
+        bids: event.bids.slice(0, 10),
+        asks: event.asks.slice(0, 10),
+        spreadBps: spreadBps(event),
+        validatedExecutions: event.executions.slice(-25),
+      } as any,
+      questions: QUESTIONS as any,
+      maxRetries: 0,
+    });
+    const direction = (result.answers.direction as any)?.choice;
+    const toxicity = (result.answers.toxicity as any)?.choice;
+    const volatility = (result.answers.volatility as any)?.choice;
+    const probabilities = (result.answers.direction as any)?.probabilities ?? {};
+    const confidence = Math.max(Number(probabilities.bullish ?? 0), Number(probabilities.bearish ?? 0), Number(probabilities.neutral ?? 0));
+    if (!["bullish", "bearish", "neutral"].includes(direction) || !["low", "medium", "high"].includes(toxicity) || !["calm", "normal", "extreme"].includes(volatility)) throw new Error("Jev returned an invalid typed assessment");
+    return { direction, toxicity, volatility, confidence: Math.max(0, Math.min(1, confidence)), latencyMs: performance.now() - started, inputTokens: result.usage?.inputTokens ?? 0 };
+  }
+}
 
-  async decide(state: TradeState): Promise<Decision> {
-    const t0 = performance.now();
-    const r = await experimental_evaluate({ model: this.model, state: state as any, questions: QUESTIONS, maxRetries: 0 });
-    const a = r.answers.direction;
-    const p = a.probabilities ?? { buy: 0, sell: 0, [a.choice]: 1 };
-    const buy = p.buy ?? 0, sell = p.sell ?? 0;
+/** Deterministic local stand-in; seed is recorded in events, not used to add hidden strategy noise. */
+export class MockModel implements DecisionModel {
+  async assess(event: MarketEvent): Promise<JevAssessment> {
+    const first = event.bids[0]?.price ?? event.asks[0]?.price ?? 0;
+    const last = event.asks[0]?.price ?? first;
+    const mid = (first + last) / 2;
+    const prior = event.bids[0]?.baseVolume ?? 0;
+    const ask = event.asks[0]?.baseVolume ?? 0;
+    const imbalance = prior + ask ? (prior - ask) / (prior + ask) : 0;
+    const netFlow = event.executions.reduce((sum, t) => sum + (t.side === "buy" ? t.baseVolume : -t.baseVolume), 0);
+    const signal = imbalance + (mid ? netFlow / Math.max(prior + ask, 1e-9) : 0);
+    const spread = spreadBps(event);
     return {
-      action: a.choice as Action,
-      probabilities: { buy, sell, hold: 0 },
-      upIn10: buy,
-      latencyMs: performance.now() - t0,
-      inputTokens: r.usage?.inputTokens ?? 0,
+      direction: signal > 0.12 ? "bullish" : signal < -0.12 ? "bearish" : "neutral",
+      toxicity: spread > config.spreadBps * 3 ? "high" : spread > config.spreadBps * 1.5 ? "medium" : "low",
+      volatility: spread > config.spreadBps * 3 ? "extreme" : spread > config.spreadBps ? "normal" : "calm",
+      confidence: Math.min(1, Math.abs(signal)), latencyMs: 0, inputTokens: 0,
     };
   }
 }
 
-/** Deterministic stand-in: momentum + imbalance + mean reversion toward flat. */
-export class MockModel implements Model {
-  readonly name = "mock";
-
-  async decide(state: TradeState): Promise<Decision> {
-    const t0 = performance.now();
-    // momentum + book imbalance + noise, pulled back toward flat so it trades both ways
-    const flow = state.trades.buyMon + state.trades.sellMon ? state.trades.cvdMon / (state.trades.buyMon + state.trades.sellMon) : 0;
-    const signal = state.returnsBps.last20 / 8 + state.bookImbalance * 1.5 + flow * 2 + this.noise(state.block);
-    const buy = 1 / (1 + Math.exp(-signal)); // binary softmax
-    const probabilities = { buy, sell: 1 - buy, hold: 0 };
-    const action: Action = buy >= 0.5 ? "buy" : "sell";
-    await Bun.sleep(80); // stand in for inference time so the pipeline behaves like production
-    return {
-      action, probabilities,
-      upIn10: buy,
-      latencyMs: performance.now() - t0,
-      inputTokens: Math.round(JSON.stringify(state).length / 4),
-    };
-  }
-
-  private noise(block: number) {
-    let h = block * 2654435761 >>> 0;
-    h ^= h >>> 15; h = (h * 2246822519) >>> 0; h ^= h >>> 13;
-    return ((h % 1000) / 1000 - 0.5) * 3;
-  }
+export function createModel(): DecisionModel { return config.model === "jev" ? new JevModel() : new MockModel(); }
+export function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return Promise.race([promise, new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Jev assessment timed out")), timeoutMs))]);
 }
-
-export const createModel = (): Model => (config.model === "jev" ? new JevModel() : new MockModel());
+function spreadBps(event: MarketEvent) { const bid = event.bids[0]?.price, ask = event.asks[0]?.price; const mid = bid && ask ? (bid + ask) / 2 : 0; return mid ? ((ask! - bid!) / mid) * 10_000 : Infinity; }

@@ -1,31 +1,12 @@
-# Jev Trader — web
+# Jev XRPL Trader dashboard
 
-Next.js (App Router, TypeScript, CSS Modules — no Tailwind) frontend for Jev Trader:
-one AI trade decision every Monad block.
+Local Next.js App Router UI for the paper-only XRPL trading daemon.
 
-## Run
-
-```bash
-export BUN_INSTALL_CACHE_DIR="$TMPDIR/bun-cache" BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
+```sh
 bun install
-bun run dev      # http://localhost:3000
-bun run build
+bun run dev -- --port 3002
 ```
 
-Use Bun only — npm is broken on this machine.
+The browser connects to `http://127.0.0.1:3000/events` by default. Override with `NEXT_PUBLIC_API_URL` if the local data API uses another loopback port. The read-only dashboard cannot access the bearer token for admin controls.
 
-## Config
-
-Copy `.env.example` to `.env.local`. `NEXT_PUBLIC_API_URL` points at the backend
-(default `https://jev-trader-production.up.railway.app`); the app opens an
-EventSource on `$NEXT_PUBLIC_API_URL/events`.
-
-## Layout
-
-- `src/lib/types.ts` — wire types (`BlockEvent`, `Decision`, `Fill`, `Meta`, …)
-- `src/lib/useFeed.ts` — SSE hook: snapshot / block / fill / ping, 1000-event
-  window, 1s→10s reconnect backoff, `connection` state, `avgLatencyMs`
-- `src/lib/useUptime.ts` — `useUptime(startedAt)` → ticking `"hh:mm:ss"`
-- `src/lib/format.ts` — number/address/tx formatting
-- `src/app/globals.css` — design tokens, `pulse`/`breathe` keyframes, `.card`
-- `src/components/<Name>/<Name>.tsx` — UI components (one folder each)
+`src/lib/useFeed.ts` handles the versioned cycle SSE, reconnects with backoff, and retains the latest 500 cycles. The page shows XRPL/Testnet status and independent results for baseline, Jev-skewed baseline, and static passive control.

@@ -1,70 +1,73 @@
-# jev-trader
+# Jev XRPL Trader
 
-One decision every Monad block. A TypeSafe Jev model watches the Kuru MON-USDC order book and answers buy or sell every ~300 ms. Every block posts a real post-only limit order on that side, one tick inside the touch, replacing the last one. Fills happen when a taker hits it, so the bot earns the spread instead of paying it. A small server streams every block to the dashboard.
+Paper-only XRPL market-making research service, forked from [jarrodwatts/jev-trader](https://github.com/jarrodwatts/jev-trader). It reads validated XRPL Testnet ledgers and order books, evaluates three independent virtual strategies against the same immutable events, and signs or submits no transactions.
 
-## Run
+This repository preserves the upstream MIT license and copyright notice. See [LICENSE](LICENSE).
 
-    cp .env.example .env
-    bun install
-    bun run start
+## Safety boundary
 
-With no `PRIVATE_KEY` it dry-runs: real book, real decisions, simulated fills. Set `MODEL=jev` and `TYPESAFE_AI_API_KEY` to use Jev; the default `mock` is a momentum heuristic stand-in.
+- `MODE` must be `paper`; `NETWORK` must be `testnet`. Schema validation rejects live or Mainnet values before startup.
+- The only executor in this build is `PaperExecutor`. No wallet, seed, private key, transaction builder, or signing adapter is loaded. Signing-related environment variables are rejected.
+- Use a dedicated `DATA_DIR` for a new session. Existing audit state is tied to the original source, market, and synthetic seed.
+- Every issued asset requires the exact XRPL currency code and issuer address. XRP is native and has no issuer.
+- Testnet direct-offer executions are inferred from validated `OfferCreate` metadata. AMM and routed volumes are omitted, making the fill model conservative. Partial fills are limited by eligible validated direct-offer volume, queue ahead, and remaining virtual offer size.
+- `stop` activates the persistent emergency stop and clears simulated offers. It leaves the daemon available for inspection. Press Ctrl+C in the foreground terminal to exit; the stop state is restored on the next start. `reset-stop` explicitly clears it.
 
-## Endpoints
+## Configure and run
 
-Deployed (dry run, mock model): https://jev-trader-production.up.railway.app
+Install [Bun](https://bun.sh), copy `.env.example` to `.env`, then set `BASE_CURRENCY`, `QUOTE_CURRENCY`, and the exact `QUOTE_ISSUER` (for an issued quote asset). For an XRP base, leave `BASE_ISSUER` unset. Keep Jev credentials in your local environment; never put them in Git.
 
-- `GET /` snapshot: model, wallet, dryRun, latest block event
-- `GET /history` last 1000 block events
-- `GET /events` SSE: `snapshot` on connect, then one `block` event per block, plus a `fill` event whenever a live order's receipt lands
+```sh
+bun install
+bun run trader start --source synthetic --synthetic-seed demo-001
+bun run trader status
+bun run trader report
+bun run trader stop
+```
 
-Every event (see `src/trader.ts` for types):
+Use `--source testnet` to connect to the approved Testnet WebSocket, or `--source replay --replay ./data/market.jsonl` for version 1 recorded market events. Synthetic source defaults to seed `jev-xrpl-paper-v1`; use `--synthetic-seed` (never a wallet seed) to choose another seed. It is stored in session metadata and the generated sequence resumes deterministically after a restart.
 
-    {
-      "block": 105488269, "ts": 1789593630676,
-      "mid": 0.022636, "bestBid": 0.022628, "bestAsk": 0.022644, "spreadBps": 7.07,
-      "decision": { "action": "buy", "probabilities": { "buy": 0.77, "sell": 0.23, "hold": 0 }, "upIn10": 0.77, "latencyMs": 81, "late": false },
-      "quote": { "side": "buy", "price": 0.022629, "size": 200, "txHash": "0x…", "gasMon": 0.0357, "cancel": [100295801], "status": "sent", "orderId": null, "capped": false },
-      "fill": null,
-      "resting": { "bidMon": 200, "askMon": 200 },
-      "position": { "side": "short", "size": 200, "entryPrice": 0.022633, "unrealizedUsd": -0.0006, "unrealizedMon": -0.027 },
-      "totals": { "blocks": 3, "decisions": 3, "quotes": 3, "fills": 1, "reverted": 0, "lateBlocks": 0, "jevUsd": 0.000004, "gasMon": 0.107, "gasUsd": 0.0024, "realizedUsd": 0, "pnlUsd": -0.003, "pnlMon": -0.13, "pnlPct": -0.003 }
-    }
+The dashboard is a separate local web process:
 
-Every block the model is asked about the move over `HORIZON_BLOCKS` (default 100, ~30 s) and answers `buy` or `sell`. `quote` is the order that block put on the book: a post-only limit order of `TRADE_SIZE_MON` on that side, `QUOTE_INSIDE_TICKS` inside the touch (clamped to the touch when the spread is too tight), in one `batchUpdate` that also cancels everything we had resting (`cancel`). `hold` appears only with `decision.late: true`, when the model missed the block and nothing was posted. When the position cap (or, live, margin funds) blocks a side, the quote goes on the other side with `capped: true` and `probabilities` still show the model's call. `resting` is our size known to be on the book after this block. `upIn10` equals the buy probability.
+```sh
+cd web
+bun install
+bun run dev -- --port 3002
+```
 
-Live sends are fired and forgotten, so the `block` event carries the **intent**: `status: "sent"`, `gasMon` is `gasLimit x (last known base fee + priority)`. Monad charges the gas limit, so that is the real cost whether the order lands or not. The receipt arrives a block or two later as its own SSE event:
+The data API and SSE stream bind to `127.0.0.1:3000`; the authenticated admin endpoint binds to `127.0.0.1:3001`. A per-process bearer token is written to `DATA_DIR/admin.token` for the CLI. The dashboard can read events but cannot invoke administrative actions. The daemon continues if the dashboard is closed.
 
-    event: quote
-    data: { "block": 105488269, "quote": { …, "status": "placed", "orderId": 100295812, "gasMon": 0.0357 } }
+## Strategies and fill assumptions
 
-`status` becomes `placed` (with the order id) or `reverted` (the book moved through the price before the tx landed, or a cancelled order had already filled). No receipt after 10 blocks gives `lost`. Fills are not in our own transactions: someone else's taker order hits our resting one, and the Trade log for it arrives via the same `eth_getLogs` poll that feeds the model. Each block with fills gets its own SSE event, and `position`, `realizedUsd` and `fills` update then:
+- **Baseline:** deterministic two-sided passive quotes around the midpoint at the configured spread and size.
+- **Jev-skewed baseline:** baseline quotes skewed by a typed direction/toxicity/volatility/confidence assessment. High toxicity, extreme volatility, or a Jev timeout withholds quotes for that strategy only.
+- **Static passive control:** deterministic quotes at twice the configured spread and half the configured size, without directional inputs.
 
-    event: fill
-    data: { "block": 105488271, "fill": { "side": "buy", "size": 200, "price": 0.022629, "txHash": "0x…", "orderId": 100295812, "simulated": false } }
+Each strategy has independent offers, signed inventory, realized and unrealized P&L, daily loss limits, and modeled costs. Offers activate one validated ledger after placement. Configurable queue ahead is a fixed base-unit amount plus a fraction of displayed volume at better or equal prices on that side. When a validated direct DEX execution crosses an offer, it consumes queue first and then fills up to the remaining executable volume. Modeled XRPL fees (XRP) and Jev inference cost (USD) are reported separately from quote-currency P&L; neither is an actual transaction cost in this paper-only build.
 
-`txHash` is the taker's transaction. In a dry run the quote is `status: "sim"`: the order rests for one block and a real print crossing its price fills it (`simulated: true`).
+## Local persistence and operations
 
-## Layout
+`DATA_DIR` contains versioned `audit.jsonl`, `checkpoint.json`, `session.json`, and `admin.token` files. Each accepted ledger is appended before dashboard publication. Recovery loads the newest compatible checkpoint and replays later audit events. Emergency-stop state is written to the audit stream and checkpoint immediately. A partial final JSONL line is ignored on recovery; malformed earlier records fail startup.
 
-    src/config.ts   env
-    src/chain.ts    block feed (WebSocket newHeads + polling backstop, newest block only), raw RPC
-    src/book.ts     one-eth_call order book reader (decodes getL2Book, merges the AMM vault)
-    src/market.ts   Kuru: read book, hand-encoded batchUpdate (cancel + post-only place), margin deposits, local nonce, async confirmation
-    src/model.ts    Model interface, JevModel (AI SDK experimental_evaluate), MockModel
-    src/trader.ts   the loop: one in flight, hold when late, position and P&L accounting
-    src/server.ts   Bun.serve: snapshot, history, SSE
+```sh
+bun run trader status
+bun run trader report
+bun run trader cancel-all
+bun run trader stop
+bun run trader reset-stop
+```
 
-## The 300 ms budget
+`status` and `report` are read-only. Administrative requests use a random local bearer token, no CORS is enabled on the admin port, and both servers bind only to loopback.
 
-A decision and an order have to fit in one block, so the hot loop makes exactly two RPC round trips:
-one `eth_call` for the book (~18 ms on the public RPC, `READ_RPC_URL`) and one `eth_sendRawTransaction`
-(`RPC_URL`), which returns as soon as the tx is accepted. Nothing else is on the path — no
-`eth_estimateGas` (Monad charges gas on the limit, so the limit is hardcoded or derived once at
-startup), no `eth_sendRawTransactionSync` (it blocks until the tx is Proposed), no gas price lookup
-(static type-2 fees: `MAX_FEE_GWEI` cap, 2 gwei priority; the effective price is base + priority).
-Receipts, the fee estimate and the vault check run off the hot path on later blocks. Measured in a
-dry run with the mock model: read p50 18 ms, whole loop p50 100 ms (80 ms of it the mock's inference stand-in).
+## Validation
 
-    bun run scripts/bench-read.ts     # book reader vs the SDK: exactness and latency
-    bun run scripts/dry-encode.ts     # signs a buy and a sell offline, asserts the calldata matches the SDK
+```sh
+bun test
+cd web && bun run build
+```
+
+Tests cover configuration rejection, event-version validation, deterministic synthetic replay, partial fills and queue assumptions, one-ledger latency, independent strategy accounting, audit/checkpoint recovery, persistent emergency stop, and local admin controls.
+
+## Deferred
+
+Live execution, all signing adapters (including Muse), Cloudflare hosting, and Mainnet connectivity or submission are out of scope. This code is an experimental paper-trading tool, not a profitability claim or financial advice.

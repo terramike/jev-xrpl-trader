@@ -3,5 +3,5 @@ WORKDIR /app
 COPY package.json bun.lock bunfig.toml ./
 RUN bun install --frozen-lockfile --production
 COPY src ./src
-ENV NODE_ENV=production
-CMD ["bun", "run", "src/index.ts"]
+ENV NODE_ENV=production MODE=paper NETWORK=testnet
+CMD ["bun", "run", "src/cli.ts", "start"]
