@@ -31,7 +31,6 @@ const configSchema = z.object({
 }).strict().superRefine((value, ctx) => {
   if (value.network === "mainnet" && value.source !== "mainnet") ctx.addIssue({ code: "custom", path: ["source"], message: "Mainnet is available only through the explicitly selected read-only mainnet source." });
   if (value.network === "testnet" && value.source === "mainnet") ctx.addIssue({ code: "custom", path: ["network"], message: "SOURCE=mainnet requires NETWORK=mainnet." });
-  if (value.network === "mainnet" && value.model !== "mock") ctx.addIssue({ code: "custom", path: ["model"], message: "Mainnet paper observations require MODEL=mock; real Jev is disabled for this source." });
   if (value.model === "jev" && !process.env.TYPESAFE_AI_API_KEY?.trim()) ctx.addIssue({ code: "custom", path: ["model"], message: "MODEL=jev requires TYPESAFE_AI_API_KEY in the process environment. Set it in your untracked local .env; the key is never stored in the paper session." });
   if (value.source === "replay" && !value.replayPath) ctx.addIssue({ code: "custom", path: ["replayPath"], message: "REPLAY_PATH is required when SOURCE=replay." });
   if (value.base.currency.toUpperCase() === value.quote.currency.toUpperCase() && value.base.issuer === value.quote.issuer) ctx.addIssue({ code: "custom", path: ["quote"], message: "Base and quote assets must differ." });

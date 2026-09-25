@@ -6,7 +6,7 @@ This repository preserves the upstream MIT license and copyright notice. See [LI
 
 ## Safety boundary
 
-- `MODE` must be `paper`. Testnet remains the default. Mainnet is available only with both `NETWORK=mainnet` and `SOURCE=mainnet`, and always uses the read-only ledger/book reader. Mainnet requires `MODEL=mock` and a separate fresh `DATA_DIR`; live mode remains rejected.
+- `MODE` must be `paper`. Testnet remains the default. Mainnet is available only with both `NETWORK=mainnet` and `SOURCE=mainnet`, and always uses the read-only ledger/book reader. Mainnet requires a separate fresh `DATA_DIR`; `MODEL=mock` and `MODEL=jev` are supported for paper observation only, while live mode remains rejected.
 - The only executor in this build is `PaperExecutor`. No wallet, seed, private key, transaction builder, or signing adapter is loaded. Signing-related environment variables are rejected.
 - Use a dedicated `DATA_DIR` for a new session. Existing audit state is tied to the original source, market, and synthetic seed.
 - Every issued asset requires the exact XRPL currency code and issuer address. XRP is native and has no issuer.
@@ -33,9 +33,21 @@ For a read-only Mainnet paper observation, configure the exact Mainnet pair iden
 bun run trader start --mode paper --network mainnet --source mainnet --data-dir data/mainnet-shadow-2026-09-24
 ```
 
-The Mainnet source uses `XRPL_MAINNET_WS_URL` (default `wss://xrplcluster.com/`) and only subscribes to ledgers and requests validated ledger and book data. The supported endpoint hosts are restricted to documented public Mainnet endpoints. The XRP Ledger [public server list](https://xrpl.org/docs/tutorials/public-servers) notes that public servers may become unavailable and are not for sustained or business use. The only executor in this repository remains `PaperExecutor`; no transaction builder, signer, or submission path is included. Mainnet requires `MODEL=mock`, so real Jev stays disabled. A new Mainnet session cannot use the default or a populated Testnet directory. Its own Mainnet `DATA_DIR` may be reused only to resume that same saved session.
+The Mainnet source uses `XRPL_MAINNET_WS_URL` (default `wss://xrplcluster.com/`) and only subscribes to ledgers and requests validated ledger and book data. The supported endpoint hosts are restricted to documented public Mainnet endpoints. The XRP Ledger [public server list](https://xrpl.org/docs/tutorials/public-servers) notes that public servers may become unavailable and are not for sustained or business use. The only executor in this repository remains `PaperExecutor`; no transaction builder, signer, or submission path is included. Jev may be enabled for Mainnet paper observation after the read-only feed has been validated. Every new Mainnet observation requires its own fresh `DATA_DIR`; a saved Mainnet directory may be reused only to resume that same saved session.
 
-To run Jev in shadow mode, keep `NETWORK=testnet` and use `MODEL=jev`. Add your TypeSafe AI credential to the local, Git-ignored `.env` as `TYPESAFE_AI_API_KEY=...`; never pass it as a CLI argument or put it in a session file. Startup rejects Jev mode when the key is missing. The existing Testnet paper process still signs and submits nothing. For a short synthetic smoke run, select `SOURCE=synthetic` and a reproducible `SYNTHETIC_SEED`; for XRPL observation use `SOURCE=testnet`. Jev is evaluated once per accepted ledger, and its timeout or invalid response withholds only the Jev strategy's new quotes. A recorded session reports Jev calls, timeouts, latency, input tokens, and modeled inference cost separately. Mainnet continues to require `MODEL=mock`.
+For the verified XRP/RLUSD Mainnet market, use the official RLUSD currency code and issuer, and start Jev with a new directory:
+
+```sh
+bun run trader start --mode paper --network mainnet --source mainnet --model jev \
+  --quote 524C555344000000000000000000000000000000 \
+  --quote-issuer rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De \
+  --mainnet-ws-url wss://s1.ripple.com/ \
+  --data-dir data/mainnet-jev-shadow-2026-09-24
+```
+
+The pair identity is listed in [Ripple's XRPL RLUSD documentation](https://docs.ripple.com/products/stablecoin/developer-resources/rlusd-on-the-xrpl). Keep the TypeSafe key in the ignored local `.env`; Jev judgments only affect the Jev-skewed paper strategy. Baseline and static control continue on the same immutable Mainnet events.
+
+To run Jev in Testnet shadow mode, keep `NETWORK=testnet` and use `MODEL=jev`. Add your TypeSafe AI credential to the local, Git-ignored `.env` as `TYPESAFE_AI_API_KEY=...`; never pass it as a CLI argument or put it in a session file. Startup rejects Jev mode when the key is missing. The paper process signs and submits nothing. For a short synthetic smoke run, select `SOURCE=synthetic` and a reproducible `SYNTHETIC_SEED`; for XRPL observation use `SOURCE=testnet`. Jev is evaluated once per accepted ledger, and its timeout or invalid response withholds only the Jev strategy's new quotes. A recorded session reports Jev calls, timeouts, latency, input tokens, and modeled inference cost separately.
 
 Version 3 changes the persisted event and financial amount representation. Start it with a new, empty `DATA_DIR` (for example, `DATA_DIR=data/paper-v3`); do not point it at a version 1 session. Version 1 and other earlier audit journals, checkpoints, and replay files are not migrated or deleted: the v3 reader rejects them with a schema-version error. Keep old data separately if it is needed for reference.
 

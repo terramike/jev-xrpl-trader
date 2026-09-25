@@ -33,14 +33,18 @@ describe("paper configuration", () => {
     expect(testnet.source).toBe("testnet");
     expect(testnet.wsUrl).toBe("wss://s.altnet.rippletest.net:51233");
   });
-  test("selects Mainnet only with explicit paper network and source, and keeps Jev mock-only", () => {
+  test("selects read-only Mainnet explicitly and permits Jev only in paper mode", () => {
     const mainnet = parseConfig({ ...config, network: "mainnet", source: "mainnet", dataDir: "data/mainnet-shadow-test" });
     expect(mainnet.network).toBe("mainnet");
     expect(mainnet.source).toBe("mainnet");
     expect(mainnet.mainnetWsUrl).toBe("wss://xrplcluster.com/");
     expect(() => parseConfig({ ...config, network: "mainnet" })).toThrow();
     expect(() => parseConfig({ ...config, source: "mainnet" })).toThrow();
-    expect(() => parseConfig({ ...mainnet, model: "jev" })).toThrow();
+    const previousKey = process.env.TYPESAFE_AI_API_KEY;
+    process.env.TYPESAFE_AI_API_KEY = "test-only-credential";
+    try { expect(parseConfig({ ...mainnet, model: "jev", mainnetWsUrl: "wss://s1.ripple.com/" }).model).toBe("jev"); }
+    finally { if (previousKey === undefined) delete process.env.TYPESAFE_AI_API_KEY; else process.env.TYPESAFE_AI_API_KEY = previousKey; }
+    expect(() => parseConfig({ ...mainnet, model: "jev", mode: "live" })).toThrow();
     expect(() => parseConfig({ ...mainnet, mainnetWsUrl: "wss://s.altnet.rippletest.net:51233" })).toThrow();
     expect(() => parseConfig({ ...mainnet, mainnetWsUrl: "ws://xrplcluster.com/" })).toThrow();
     expect(() => parseConfig({ ...config, wsUrl: "wss://s1.ripple.com/" })).toThrow();
