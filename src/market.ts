@@ -78,7 +78,7 @@ export class XrplMarketDataSource implements MarketDataSource {
     this.client.on("ledgerClosed", (ledger: any) => {
       this.queue = this.queue.then(() => this.processThrough(Number(ledger.ledger_index), ledger)).catch((error) => {
         this.paused = true;
-        console.error(`Testnet feed paused at ledger ${ledger.ledger_index}: ${(error as Error).message}`);
+        console.error(`${config.network} feed paused at ledger ${ledger.ledger_index}: ${(error as Error).message}`);
       });
     });
   }
