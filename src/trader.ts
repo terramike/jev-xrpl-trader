@@ -22,6 +22,7 @@ export class Trader {
   private lastMid = "0";
   private lastLedgerTimestamp = 0;
   private lastMarketSource: MarketEvent["source"] | null = null;
+  private lastMarketReplay = false;
   private lastMarketReceivedAt = 0;
   private accepted = 0;
   private shutdown = false;
@@ -39,14 +40,16 @@ export class Trader {
       const mostRecentMarket = this.recentMarkets.at(-1);
       this.lastLedgerTimestamp = mostRecentMarket?.ledgerCloseTimestamp ?? mostRecentMarket?.timestamp ?? 0;
       this.lastMarketSource = mostRecentMarket?.source ?? null;
+      this.lastMarketReplay = mostRecentMarket?.replayMarker === true;
+      if (this.lastMarketReplay) this.lastMarketReceivedAt = Date.now();
     }
   }
   get status() {
     const hasLedgerClock = this.lastMarketSource === "testnet" || this.lastMarketSource === "mainnet";
     const ledgerDataAgeMs = hasLedgerClock && this.lastLedgerTimestamp ? Math.max(0, Date.now() - this.lastLedgerTimestamp) : null;
     const receiptFresh = this.lastMarketReceivedAt > 0 && Date.now() - this.lastMarketReceivedAt <= 15_000;
-    const ledgerFresh = ledgerDataAgeMs === null || ledgerDataAgeMs <= 15_000;
-    return { mode: "paper", network: config.network, source: config.source, running: !this.shutdown, marketConnection: receiptFresh && ledgerFresh ? "live" : this.lastLedgerIndex ? "stale" : "connecting", ledgerDataAgeMs, emergencyStop: this.emergencyStop, lastLedgerIndex: this.lastLedgerIndex, lastEventId: this.lastEventId, mid: this.lastMid, quoteCurrency: currencyLabel(config.quote), strategies: this.snapshots(), market: `${currencyLabel(config.base)}/${currencyLabel(config.quote)}` };
+    const ledgerFresh = this.lastMarketReplay || ledgerDataAgeMs === null || ledgerDataAgeMs <= 15_000;
+    return { mode: "paper", network: config.network, source: config.source, replayMarker: this.lastMarketReplay, running: !this.shutdown, marketConnection: this.lastMarketReplay ? "replay" : receiptFresh && ledgerFresh ? "live" : this.lastLedgerIndex ? "stale" : "connecting", ledgerDataAgeMs, emergencyStop: this.emergencyStop, lastLedgerIndex: this.lastLedgerIndex, lastEventId: this.lastEventId, mid: this.lastMid, quoteCurrency: currencyLabel(config.quote), strategies: this.snapshots(), market: `${currencyLabel(config.base)}/${currencyLabel(config.quote)}` };
   }
   get report() {
     const mid = new Decimal(this.lastMid);
@@ -97,10 +100,11 @@ export class Trader {
 
   async onMarket(market: MarketEvent) {
     if (this.shutdown || !this.isValidEvent(market) || market.ledgerIndex <= this.lastLedgerIndex) return;
-    this.lastMarketReceivedAt = market.receivedAt ?? Date.now();
+    this.lastMarketReceivedAt = market.replayMarker ? Date.now() : market.receivedAt ?? Date.now();
     this.lastMarketSource = market.source;
+    this.lastMarketReplay = market.replayMarker === true;
     const ledgerTimestamp = market.ledgerCloseTimestamp ?? market.timestamp;
-    const marketDataFresh = (market.source !== "testnet" && market.source !== "mainnet") || Date.now() - ledgerTimestamp <= 15_000;
+    const marketDataFresh = market.replayMarker === true || (market.source !== "testnet" && market.source !== "mainnet") || Date.now() - ledgerTimestamp <= 15_000;
     let assessment = null;
     let jevCostUsd = new Decimal(0);
     let jevTimedOut = false;
@@ -201,9 +205,10 @@ export class Trader {
   private isValidEvent(event: MarketEvent) {
     const same = (a: typeof config.base, b: MarketEvent["base"]) => a.currency.toUpperCase() === b.currency.toUpperCase() && a.issuer === b.issuer;
     const validLevels = (levels: MarketEvent["bids"], side: "bid" | "ask") => levels.length > 0 && levels.every((level, index) => validPositive(level.price) && validPositive(level.baseVolume) && (index === 0 || (side === "bid" ? new Decimal(levels[index - 1]!.price).gte(level.price) : new Decimal(levels[index - 1]!.price).lte(level.price))));
-    const stale = (event.source === "testnet" || event.source === "mainnet") && Date.now() - (event.receivedAt ?? event.timestamp) > 15_000;
+    const stale = !event.replayMarker && (event.source === "testnet" || event.source === "mainnet") && Date.now() - (event.receivedAt ?? event.timestamp) > 15_000;
     const timesValid = Number.isFinite(event.timestamp) && (event.receivedAt === undefined || Number.isFinite(event.receivedAt)) && (event.ledgerCloseTimestamp === undefined || Number.isFinite(event.ledgerCloseTimestamp));
-    return event.schemaVersion === EVENT_VERSION && event.type === "market" && !stale && timesValid && event.ledgerIndex > 0 && event.ledgerHash.length > 0 && same(config.base, event.base) && same(config.quote, event.quote) && validLevels(event.bids, "bid") && validLevels(event.asks, "ask") && new Decimal(event.bids[0]!.price).lt(event.asks[0]!.price) && event.executions.every((e) => validPositive(e.price) && validPositive(e.baseVolume));
+    const validReplay = event.source !== "replay" && (event.replayMarker !== true || ((event.source === "mainnet" || event.source === "testnet") && event.recordedProvenance?.source === event.source && event.recordedProvenance.network === event.source && event.recordedProvenance.ledgerIndex === event.ledgerIndex && event.recordedProvenance.ledgerHash === event.ledgerHash));
+    return event.schemaVersion === EVENT_VERSION && event.type === "market" && validReplay && !stale && timesValid && event.ledgerIndex > 0 && event.ledgerHash.length > 0 && same(config.base, event.base) && same(config.quote, event.quote) && validLevels(event.bids, "bid") && validLevels(event.asks, "ask") && new Decimal(event.bids[0]!.price).lt(event.asks[0]!.price) && event.executions.every((e) => validPositive(e.price) && validPositive(e.baseVolume));
   }
 }
 

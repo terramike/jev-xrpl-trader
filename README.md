@@ -6,11 +6,11 @@ This repository preserves the upstream MIT license and copyright notice. See [LI
 
 ## Safety boundary
 
-- `MODE` must be `paper`. Testnet remains the default. Mainnet is available only with both `NETWORK=mainnet` and `SOURCE=mainnet`, and always uses the read-only ledger/book reader. Mainnet requires a separate fresh `DATA_DIR`; `MODEL=mock` and `MODEL=jev` are supported for paper observation only, while live mode remains rejected.
+- `MODE` must be `paper`. Testnet remains the default. Mainnet is available only with `NETWORK=mainnet` and explicit `SOURCE=mainnet` or `SOURCE=replay`; live Mainnet reads validated ledgers and the book, while replay reads saved Mainnet audit events. Each new Mainnet live or replay session requires a separate fresh `DATA_DIR`; `MODEL=mock` and `MODEL=jev` are paper-only, while live mode remains rejected.
 - The only executor in this build is `PaperExecutor`. No wallet, seed, private key, transaction builder, or signing adapter is loaded. Signing-related environment variables are rejected.
 - Use a dedicated `DATA_DIR` for a new session. Existing audit state is tied to the original source, market, and synthetic seed.
 - Every issued asset requires the exact XRPL currency code and issuer address. XRP is native and has no issuer.
-- Testnet direct-offer executions are inferred from metadata in validated `OfferCreate` and `Payment` transactions. Unsupported payment executions without matching target-book offer deltas are explicitly omitted; AMM and non-target routed volumes are not estimated. XRPL metadata is treated as final only after the ledger is validated.
+- Testnet and Mainnet direct-offer executions are inferred from metadata in validated `OfferCreate` and `Payment` transactions. Unsupported payment executions without matching target-book offer deltas are explicitly omitted; AMM and non-target routed volumes are not estimated. XRPL metadata is treated as final only after the ledger is validated.
 - `stop` activates the persistent emergency stop and clears simulated offers. It leaves the daemon available for inspection. Press Ctrl+C in the foreground terminal to exit; the stop state is restored on the next start. `reset-stop` explicitly clears it.
 
 ## Configure and run
@@ -25,7 +25,7 @@ bun run trader report
 bun run trader stop
 ```
 
-Use `--source testnet` to connect to the approved Testnet WebSocket, or `--source replay --replay ./data/market.jsonl` for version 5 recorded market events. Financial amounts, prices, inventory, and P&L are serialized as decimal strings; XRP fees are stored as integer drops. Version 3 and 4 audit journals and checkpoints are recovered in place with offers, inventory, P&L, risk, and emergency-stop state intact; v5 exposure and quote analytics restart at the first v5 ledger because older events lack reliable ledger-close timing. Version 1 and 2 journals and older replay files are rejected instead of being reinterpreted with lossy numeric state. Synthetic source defaults to seed `jev-xrpl-paper-v1`; use `--synthetic-seed` (never a wallet seed) to choose another seed. It is stored in session metadata and the generated sequence resumes deterministically after a restart.
+Use `--source testnet` to connect to the approved Testnet WebSocket. `--network mainnet --source replay --replay <saved-audit.jsonl>` replays version 5 or 6 Mainnet market events from a session audit; `--replay-interval-ms 0` runs them as fast as model calls permit. Replay wraps each event with `replayMarker=true`, preserves its original ledger-close and receipt timestamps, and records its original source, event id, ledger index, ledger hash, and input-file SHA-256. The marker exempts only replayed events from wall-clock freshness gates; stale live events remain rejected. Every replay session needs a new `DATA_DIR`. Financial amounts, prices, inventory, and P&L are serialized as decimal strings; XRP fees are stored as integer drops. Version 3 and 4 audit journals and checkpoints are recovered in place with trading state intact and timing analytics reset; v5 records migrate to v6 without resetting those analytics. Version 1 and 2 journals and older replay files are rejected. Synthetic source defaults to seed `jev-xrpl-paper-v1`; use `--synthetic-seed` (never a wallet seed) to choose another seed. It is stored in session metadata and the generated sequence resumes deterministically after a restart.
 
 For a read-only Mainnet paper observation, configure the exact Mainnet pair identity, then explicitly select Mainnet and a new, empty data directory:
 
@@ -34,6 +34,16 @@ bun run trader start --mode paper --network mainnet --source mainnet --data-dir 
 ```
 
 The Mainnet source uses `XRPL_MAINNET_WS_URL` (default `wss://xrplcluster.com/`) and only subscribes to ledgers and requests validated ledger and book data. The supported endpoint hosts are restricted to documented public Mainnet endpoints. The XRP Ledger [public server list](https://xrpl.org/docs/tutorials/public-servers) notes that public servers may become unavailable and are not for sustained or business use. The only executor in this repository remains `PaperExecutor`; no transaction builder, signer, or submission path is included. Jev may be enabled for Mainnet paper observation after the read-only feed has been validated. Every new Mainnet observation requires its own fresh `DATA_DIR`; a saved Mainnet directory may be reused only to resume that same saved session.
+
+To replay a saved Mainnet observation into another isolated paper session, point to its audit journal and select a fresh directory:
+
+```sh
+bun run trader start --mode paper --network mainnet --source replay --model mock \
+  --replay data/mainnet-shadow-2026-09-24/audit.jsonl --replay-interval-ms 0 \
+  --quote 524C555344000000000000000000000000000000 \
+  --quote-issuer rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De \
+  --data-dir data/mainnet-replay-mock-2026-09-24
+```
 
 For the verified XRP/RLUSD Mainnet market, use the official RLUSD currency code and issuer, and start Jev with a new directory:
 
@@ -49,7 +59,7 @@ The pair identity is listed in [Ripple's XRPL RLUSD documentation](https://docs.
 
 To run Jev in Testnet shadow mode, keep `NETWORK=testnet` and use `MODEL=jev`. Add your TypeSafe AI credential to the local, Git-ignored `.env` as `TYPESAFE_AI_API_KEY=...`; never pass it as a CLI argument or put it in a session file. Startup rejects Jev mode when the key is missing. The paper process signs and submits nothing. For a short synthetic smoke run, select `SOURCE=synthetic` and a reproducible `SYNTHETIC_SEED`; for XRPL observation use `SOURCE=testnet`. Jev is evaluated once per accepted ledger, and its timeout or invalid response withholds only the Jev strategy's new quotes. A recorded session reports Jev calls, timeouts, latency, input tokens, and modeled inference cost separately.
 
-Version 5 records both ledger-close and receipt timestamps, so inventory holding time follows ledger time even during a feed backfill. Versions 3 and 4 can continue in place with their offers, P&L, risk, and emergency stop preserved; reporting-only analytics restart at the first v5 ledger. New Mainnet observations must use an explicit, separate `DATA_DIR`; each session record stores its market and modeled cost assumptions.
+Version 6 adds an explicit replay marker and recorded-source provenance while preserving v5 ledger-close accounting timestamps. Versions 3 and 4 can continue in place with offers, P&L, risk, and emergency-stop state preserved; timing analytics restart at the first v5 ledger. Version 5 trading and timing metrics survive migration to v6. Each Mainnet replay session stores the input audit SHA-256 so restarts cannot silently switch recordings.
 
 The dashboard is a separate local web process:
 
@@ -94,8 +104,8 @@ bun test
 cd web && bun run build
 ```
 
-Tests cover configuration rejection, event-version validation, deterministic synthetic replay, partial fills and queue assumptions, one-ledger latency, independent strategy accounting, audit/checkpoint recovery, persistent emergency stop, and local admin controls.
+Tests cover configuration rejection, event-version migration, stale-live versus old-ledger replay handling, ordered identical replay inputs across mock and Jev model adapters, deterministic synthetic replay, partial fills and shared queue assumptions, one-ledger latency, independent strategy accounting, audit/checkpoint recovery, persistent emergency stop, and local admin controls.
 
 ## Deferred
 
-Live execution, transaction signing (including Muse), and Cloudflare hosting remain deferred. Mainnet connectivity is available only as an explicitly selected, read-only paper data source; this build cannot construct or submit transactions. This code is an experimental paper-trading tool, not a profitability claim or financial advice.
+Live execution, transaction signing (including Muse), and Cloudflare hosting remain deferred. Mainnet is supported only as explicitly selected read-only paper observation or replay; this build cannot construct or submit transactions. This code is an experimental paper-trading tool, not a profitability claim or financial advice.

@@ -14,15 +14,15 @@ process.env.QUOTE_ISSUER = "rrrrrrrrrrrrrrrrrrrrBZbvji";
 process.env.PORT = String(31_000 + process.pid % 2_000);
 process.env.ADMIN_PORT = String(33_000 + process.pid % 2_000);
 
-const [{ config, parseConfig, assertNoSigningCredentials }, { SyntheticMarketDataSource }, { PaperExecutor }, { initialStrategyState, initialStrategies, AuditStore, assertFreshMainnetDataDir }, { Trader }, { startServers }, { executionsFromTransaction, transactionExecutionResult, retryDelayForRateLimit, parseLedgerCloseTimestamp }] = await Promise.all([
+const [{ config, parseConfig, assertNoSigningCredentials }, { SyntheticMarketDataSource, ReplayMarketDataSource, readReplayMarketEvents }, { PaperExecutor }, { initialStrategyState, initialStrategies, AuditStore, assertFreshMainnetDataDir }, { Trader }, { startServers }, { executionsFromTransaction, transactionExecutionResult, retryDelayForRateLimit, parseLedgerCloseTimestamp }] = await Promise.all([
   import("../src/config"), import("../src/sources"), import("../src/execution/paper"), import("../src/storage"), import("../src/trader"), import("../src/server"), import("../src/market"),
 ]);
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function tempDir() { const dir = mkdtempSync(join(tmpdir(), "jev-paper-")); dirs.push(dir); return dir; }
-function marketEvent(ledgerIndex: number, executions: any[] = [], source: "synthetic" | "testnet" = "synthetic") {
-  return Object.freeze({ schemaVersion: 5 as const, eventId: `${source}:${ledgerIndex}`, type: "market" as const, timestamp: source === "testnet" ? Date.now() : 1_700_000_000_000 + ledgerIndex * 4_000, ledgerIndex, ledgerHash: `hash-${ledgerIndex}`, base: Object.freeze({ currency: "XRP" }), quote: Object.freeze({ currency: "USD", issuer: "rrrrrrrrrrrrrrrrrrrrBZbvji" }), bids: Object.freeze([{ price: "0.4995", baseVolume: "20" }]), asks: Object.freeze([{ price: "0.5005", baseVolume: "20" }]), executions: Object.freeze(executions.map((trade) => ({ ...trade, price: String(trade.price), baseVolume: String(trade.baseVolume) }))), unsupportedExecutions: Object.freeze([]), source, ...(source === "synthetic" ? { syntheticSeed: "unit-test" } : {}) });
+function marketEvent(ledgerIndex: number, executions: any[] = [], source: "synthetic" | "testnet" | "mainnet" = "synthetic") {
+  return Object.freeze({ schemaVersion: 6 as const, eventId: `${source}:${ledgerIndex}`, type: "market" as const, timestamp: source === "synthetic" ? 1_700_000_000_000 + ledgerIndex * 4_000 : Date.now(), ledgerIndex, ledgerHash: `hash-${ledgerIndex}`, base: Object.freeze({ currency: "XRP" }), quote: Object.freeze({ currency: "USD", issuer: "rrrrrrrrrrrrrrrrrrrrBZbvji" }), bids: Object.freeze([{ price: "0.4995", baseVolume: "20" }]), asks: Object.freeze([{ price: "0.5005", baseVolume: "20" }]), executions: Object.freeze(executions.map((trade) => ({ ...trade, price: String(trade.price), baseVolume: String(trade.baseVolume) }))), unsupportedExecutions: Object.freeze([]), source, ...(source === "synthetic" ? { syntheticSeed: "unit-test" } : {}) });
 }
 
 describe("TypeSafe confidence", () => {
@@ -78,6 +78,10 @@ describe("paper configuration", () => {
     expect(() => parseConfig({ ...mainnet, mainnetWsUrl: "wss://s.altnet.rippletest.net:51233" })).toThrow();
     expect(() => parseConfig({ ...mainnet, mainnetWsUrl: "ws://xrplcluster.com/" })).toThrow();
     expect(() => parseConfig({ ...config, wsUrl: "wss://s1.ripple.com/" })).toThrow();
+    const replay = parseConfig({ ...mainnet, source: "replay", replayPath: "data/mainnet/audit.jsonl" });
+    expect(replay.network).toBe("mainnet");
+    expect(replay.source).toBe("replay");
+    expect(() => parseConfig({ ...replay, source: "mainnet" })).not.toThrow();
   });
   test("requires a fresh Mainnet DATA_DIR and refuses Testnet data reuse", () => {
     const fresh = join(tempDir(), "mainnet-fresh");
@@ -92,6 +96,11 @@ describe("paper configuration", () => {
     mkdirSync(resumable);
     writeFileSync(join(resumable, "session.json"), JSON.stringify({ network: "mainnet", source: "mainnet" }));
     expect(() => assertFreshMainnetDataDir(resumable)).not.toThrow();
+    const replayResume = join(tempDir(), "mainnet-replay-resume");
+    mkdirSync(replayResume);
+    writeFileSync(join(replayResume, "session.json"), JSON.stringify({ network: "mainnet", source: "replay" }));
+    expect(() => assertFreshMainnetDataDir(replayResume, "replay")).not.toThrow();
+    expect(() => assertFreshMainnetDataDir(replayResume, "mainnet")).toThrow("choose a new empty directory");
   });
   test("rejects live, Mainnet, missing issuer, identical pair, and replay without a file", () => {
     expect(() => parseConfig({ ...config, mode: "live" })).toThrow();
@@ -118,6 +127,58 @@ describe("market events and paper fills", () => {
     expect(first).toEqual(second);
     expect(Object.isFrozen(first)).toBe(true);
     expect(Object.isFrozen((first as any).bids)).toBe(true);
+  });
+  test("Mainnet replay preserves recorded ledger time and provenance and bypasses only live freshness", async () => {
+    const old = Date.parse("2024-02-03T04:05:06Z");
+    const recorded = { ...marketEvent(1, [], "mainnet"), schemaVersion: 5, timestamp: old, ledgerCloseTimestamp: old, receivedAt: old };
+    const path = join(tempDir(), "session-audit.jsonl");
+    writeFileSync(path, JSON.stringify({ schemaVersion: 5, eventId: "cycle:mainnet:1", type: "cycle", market: recorded }) + "\n");
+    const parsed = readReplayMarketEvents(readFileSync(path, "utf8"), "mainnet");
+    expect(() => readReplayMarketEvents(readFileSync(path, "utf8"), "testnet")).toThrow("does not match the selected testnet network");
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]).toMatchObject({ schemaVersion: 6, source: "mainnet", replayMarker: true, timestamp: old, ledgerCloseTimestamp: old, receivedAt: old, recordedProvenance: { source: "mainnet", network: "mainnet", eventId: "mainnet:1", ledgerIndex: 1, ledgerHash: "hash-1", receivedAt: old } });
+
+    const liveTrader = new Trader({ assess: async () => ({ direction: "neutral", toxicity: "low", volatility: "calm", confidence: 0.5, latencyMs: 0, inputTokens: 0 }) }, new AuditStore(tempDir()));
+    await liveTrader.onMarket({ ...marketEvent(1, [], "mainnet"), timestamp: old, receivedAt: old, ledgerCloseTimestamp: old });
+    expect(liveTrader.report.observation.ledgersProcessed).toBe(0);
+
+    const replayStore = new AuditStore(tempDir());
+    const replayTrader = new Trader({ assess: async () => ({ direction: "neutral", toxicity: "low", volatility: "calm", confidence: 0.5, latencyMs: 0, inputTokens: 0 }) }, replayStore);
+    await replayTrader.onMarket(parsed[0]!);
+    expect(replayTrader.report.observation.ledgersProcessed).toBe(1);
+    expect(replayTrader.report.strategies.every((strategy) => strategy.openOffers > 0)).toBe(true);
+    expect(replayTrader.status.replayMarker).toBe(true);
+    expect(replayTrader.status.marketConnection).toBe("replay");
+    const audited = JSON.parse(readFileSync(replayStore.auditPath, "utf8").trim());
+    expect(audited.market.recordedProvenance.ledgerHash).toBe("hash-1");
+    expect(audited.market.ledgerCloseTimestamp).toBe(old);
+  });
+  test("both replay models receive identical ordered Mainnet events and paper fill assumptions", async () => {
+    const dir = tempDir(), path = join(dir, "recorded.jsonl"), close = Date.parse("2024-01-01T00:00:00Z");
+    const records = [1, 2, 3].map((index) => ({ schemaVersion: 5, eventId: `mainnet:${index}`, type: "market", timestamp: close + index * 4_000, ledgerCloseTimestamp: close + index * 4_000, receivedAt: close + index * 4_000, ledgerIndex: index, ledgerHash: `recorded-hash-${index}`, base: config.base, quote: config.quote, bids: [{ price: "0.4995", baseVolume: "20" }], asks: [{ price: "0.5005", baseVolume: "20" }], executions: index === 2 ? [{ side: "sell", price: "0.49", baseVolume: "10", sourceTx: "recorded-tx" }] : [], unsupportedExecutions: [], source: "mainnet" }));
+    writeFileSync(path, records.map((event) => JSON.stringify(event)).join("\n") + "\n");
+    const collect = async () => new Promise<any[]>((resolve, reject) => {
+      const source = new ReplayMarketDataSource(0, path, 0, "mainnet"), received: any[] = [];
+      void source.start((event) => { received.push(event); if (received.length === records.length) { void source.close(); resolve(received); } }).catch(reject);
+    });
+    const [mockEvents, jevEvents] = await Promise.all([collect(), collect()]);
+    expect(mockEvents).toEqual(jevEvents);
+    expect(() => readReplayMarketEvents(records.slice().reverse().map((event) => JSON.stringify(event)).join("\n"), "mainnet")).toThrow("ledger indices must increase strictly");
+    const run = async (assessment: any) => {
+      const seen: any[] = [], store = new AuditStore(tempDir());
+      const trader = new Trader({ assess: async (event, history) => { seen.push({ event, history }); return { ...assessment, latencyMs: 7, inputTokens: 11 }; } }, store);
+      for (const event of mockEvents) await trader.onMarket(event);
+      const cycles = readFileSync(store.auditPath, "utf8").split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)).filter((event) => event.type === "cycle");
+      return { trader, seen, cycles };
+    };
+    const mock = await run({ direction: "neutral", toxicity: "low", volatility: "calm", confidence: 0.6 });
+    const jev = await run({ direction: "bullish", toxicity: "low", volatility: "calm", confidence: 0.9 });
+    expect(mock.seen.map(({ event, history }) => ({ event, history }))).toEqual(jev.seen.map(({ event, history }) => ({ event, history })));
+    expect(mock.trader.report.queueAssumptions).toEqual(jev.trader.report.queueAssumptions);
+    expect(mock.trader.report.offerLifetimeLedgers).toBe(jev.trader.report.offerLifetimeLedgers);
+    expect(mock.cycles.map((cycle) => cycle.eligibleDirectOfferVolume)).toEqual(jev.cycles.map((cycle) => cycle.eligibleDirectOfferVolume));
+    const passiveFills = (run: any) => run.cycles.flatMap((cycle: any) => cycle.fills.filter((fill: any) => fill.strategy !== "jev"));
+    expect(passiveFills(mock)).toEqual(passiveFills(jev));
   });
   test("extracts only validated direct offer executions with normalized direction", () => {
     const message = { validated: true, tx_json: { TransactionType: "OfferCreate", hash: "abc" }, meta: { TransactionResult: "tesSUCCESS", AffectedNodes: [{ ModifiedNode: { LedgerEntryType: "Offer", FinalFields: { TakerGets: { currency: "XRP", value: "5" }, TakerPays: { currency: "USD", issuer: config.quote.issuer, value: "10" } }, PreviousFields: { TakerGets: { currency: "XRP", value: "6" }, TakerPays: { currency: "USD", issuer: config.quote.issuer, value: "12" } } } }] } };
@@ -269,7 +330,7 @@ describe("recovery, risk and administration", () => {
     expect(restored.strategies.baseline.risk.dailyRealizedLoss).toBe("0.00000000000000000000003");
     expect(restored.emergencyStop).toBe(true);
   });
-  test("migrates v4 state to v5 without losing trading state and restarts old timing analytics", () => {
+  test("migrates v4 state to v6 without losing trading state and restarts old timing analytics", () => {
     const store = new AuditStore(tempDir()), strategies = initialStrategies();
     strategies.jev.inventory = "-3.25"; strategies.jev.realizedPnl = "0.75"; strategies.jev.risk.stopped = true; strategies.jev.risk.reason = "daily loss";
     strategies.jev.timeHoldingXrpMs = 99_000; strategies.jev.xrpExposureMs = "12345"; strategies.jev.quoteTurnoverQuote = "9.5"; strategies.jev.peakShortInventory = "7";
@@ -285,6 +346,18 @@ describe("recovery, risk and administration", () => {
     expect(recovered.strategies.jev.quoteTurnoverQuote).toBe("0");
     expect(recovered.strategies.jev.peakShortInventory).toBe("3.25");
     expect(recovered.emergencyStop).toBe(true);
+  });
+  test("migrates v5 checkpoints to v6 while preserving complete timing analytics", () => {
+    const store = new AuditStore(tempDir()), strategies = initialStrategies();
+    strategies.jev.inventory = "2.5"; strategies.jev.timeHoldingXrpMs = 12_000; strategies.jev.xrpExposureMs = "30_000"; strategies.jev.quoteTurnoverQuote = "4.75"; strategies.jev.peakLongInventory = "3";
+    store.checkpoint({ schemaVersion: 5, lastEventId: "cycle:v5", lastLedgerIndex: 8, lastMid: "0.5", emergencyStop: false, strategies } as any);
+    const recovered = store.recover()!;
+    expect(recovered.schemaVersion).toBe(6);
+    expect(recovered.strategies.jev.inventory).toBe("2.5");
+    expect(recovered.strategies.jev.timeHoldingXrpMs).toBe(12_000);
+    expect(recovered.strategies.jev.xrpExposureMs).toBe("30_000");
+    expect(recovered.strategies.jev.quoteTurnoverQuote).toBe("4.75");
+    expect(recovered.strategies.jev.peakLongInventory).toBe("3");
   });
   test("Jev timeout withholds only Jev strategy exposure", async () => {
     const trader = new Trader({ assess: async () => new Promise<any>(() => {}) }, new AuditStore(tempDir()));

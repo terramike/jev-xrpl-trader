@@ -24,14 +24,14 @@ function normalizeStrategyState(value: StrategyState, resetAnalytics = false): S
 }
 function normalizeStrategies(value: Record<StrategyId, StrategyState>, resetAnalytics = false): Record<StrategyId, StrategyState> { return Object.fromEntries(STRATEGY_IDS.map((id) => [id, normalizeStrategyState(value[id], resetAnalytics)])) as Record<StrategyId, StrategyState>; }
 
-export function assertFreshMainnetDataDir(dataDir: string) {
+export function assertFreshMainnetDataDir(dataDir: string, source: "mainnet" | "replay" = "mainnet") {
   if (resolve(dataDir) === resolve("data")) throw new Error("Mainnet paper sessions require an explicitly selected fresh DATA_DIR, separate from the default Testnet data directory.");
   if (!existsSync(dataDir)) return;
   const entries = readdirSync(dataDir);
   if (!entries.length) return;
   let session: SessionMeta | null = null;
   try { session = JSON.parse(readFileSync(join(dataDir, "session.json"), "utf8")); } catch { /* A populated directory without a valid session cannot be treated as fresh. */ }
-  if (session?.network === "mainnet" && session.source === "mainnet") return;
+  if (session?.network === "mainnet" && session.source === source) return;
   throw new Error("Mainnet paper sessions require a fresh DATA_DIR. This directory already contains data from another or unidentified session; choose a new empty directory.");
 }
 
@@ -65,9 +65,9 @@ export class AuditStore {
     if (existsSync(this.checkpointPath)) {
       try {
         const cp = JSON.parse(readFileSync(this.checkpointPath, "utf8"));
-        if (![3, 4, EVENT_VERSION].includes(cp.schemaVersion)) checkpointProblem = `schema version ${String(cp.schemaVersion)} is incompatible with supported versions 3, 4, and ${EVENT_VERSION}`;
+        if (![3, 4, 5, EVENT_VERSION].includes(cp.schemaVersion)) checkpointProblem = `schema version ${String(cp.schemaVersion)} is incompatible with supported versions 3, 4, 5, and ${EVENT_VERSION}`;
         else if (!cp.strategies || typeof cp.emergencyStop !== "boolean" || !Number.isInteger(cp.lastLedgerIndex)) checkpointProblem = "required state fields are missing or invalid";
-        else state = { ...cp, schemaVersion: EVENT_VERSION, strategies: normalizeStrategies(cp.strategies, cp.schemaVersion < EVENT_VERSION) };
+        else state = { ...cp, schemaVersion: EVENT_VERSION, strategies: normalizeStrategies(cp.strategies, cp.schemaVersion < 5) };
       } catch (error) { checkpointProblem = `JSON is corrupt (${(error as Error).message})`; }
     }
     if (!existsSync(this.auditPath)) {
@@ -89,14 +89,14 @@ export class AuditStore {
       let event: AuditEvent;
       try { event = JSON.parse(events[i]!); } catch { throw new Error(`Corrupt audit record at line ${i + 1}.`); }
       const eventVersion = (event as any).schemaVersion;
-      if (![3, 4, EVENT_VERSION].includes(eventVersion)) throw new Error(checkpointProblem ? `Checkpoint recovery failed (${checkpointProblem}); audit record at line ${i + 1} uses unsupported schema version ${eventVersion}, so replay cannot safely proceed.` : `Unsupported audit schema version at line ${i + 1}.`);
+      if (![3, 4, 5, EVENT_VERSION].includes(eventVersion)) throw new Error(checkpointProblem ? `Checkpoint recovery failed (${checkpointProblem}); audit record at line ${i + 1} uses unsupported schema version ${eventVersion}, so replay cannot safely proceed.` : `Unsupported audit schema version at line ${i + 1}.`);
       if (!afterCheckpoint) { if (event.eventId === state!.lastEventId) afterCheckpoint = true; continue; }
       if (event.type === "cycle") {
         recentMarkets.push(event.market);
         if (recentMarkets.length > 50) recentMarkets.shift();
-        state = { schemaVersion: EVENT_VERSION, lastEventId: event.eventId, lastLedgerIndex: event.market.ledgerIndex, lastMid: new Decimal(event.market.bids[0]!.price).plus(event.market.asks[0]!.price).div(2).toString(), recentMarkets: structuredClone(recentMarkets), emergencyStop: event.emergencyStop, strategies: Object.fromEntries(STRATEGY_IDS.map((id) => [id, normalizeStrategyState(event.strategies[id]!.state, eventVersion < EVENT_VERSION)])) as Checkpoint["strategies"] };
+        state = { schemaVersion: EVENT_VERSION, lastEventId: event.eventId, lastLedgerIndex: event.market.ledgerIndex, lastMid: new Decimal(event.market.bids[0]!.price).plus(event.market.asks[0]!.price).div(2).toString(), recentMarkets: structuredClone(recentMarkets), emergencyStop: event.emergencyStop, strategies: Object.fromEntries(STRATEGY_IDS.map((id) => [id, normalizeStrategyState(event.strategies[id]!.state, eventVersion < 5)])) as Checkpoint["strategies"] };
       }
-      else if (event.type === "control") state = { schemaVersion: EVENT_VERSION, lastEventId: event.eventId, lastLedgerIndex: state?.lastLedgerIndex ?? 0, lastMid: state?.lastMid ?? "0", recentMarkets: structuredClone(recentMarkets), emergencyStop: event.emergencyStop, strategies: normalizeStrategies(event.strategies, eventVersion < EVENT_VERSION) };
+      else if (event.type === "control") state = { schemaVersion: EVENT_VERSION, lastEventId: event.eventId, lastLedgerIndex: state?.lastLedgerIndex ?? 0, lastMid: state?.lastMid ?? "0", recentMarkets: structuredClone(recentMarkets), emergencyStop: event.emergencyStop, strategies: normalizeStrategies(event.strategies, eventVersion < 5) };
     }
     if (state && !afterCheckpoint) throw new Error("Checkpoint event was not found in the audit log.");
     if (checkpointProblem) console.warn(`Checkpoint recovery: ${checkpointProblem}; the audit journal was validated and replayed from its beginning.`);

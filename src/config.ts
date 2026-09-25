@@ -23,14 +23,14 @@ const configSchema = z.object({
   wsUrl: websocketUrl(["s.altnet.rippletest.net", "testnet.xrpl-labs.com"], "Testnet").default("wss://s.altnet.rippletest.net:51233"),
   mainnetWsUrl: websocketUrl(["xrplcluster.com", "xrpl.ws", "s1.ripple.com", "s2.ripple.com", "honeycluster.io"], "Mainnet").default("wss://xrplcluster.com/"), dataDir: z.string().default("data"),
   model: z.enum(["mock", "jev"]).default("mock"), jevModelId: z.string().default("jev-latest"), jevTimeoutMs: z.coerce.number().int().positive().default(1500),
-  jevUsdPerMTok: decimalSetting("0.042", true), modeledXrplFeeDrops: z.string().regex(/^\d+$/).default("10"),
+  jevUsdPerMTok: decimalSetting("0.042", true), modeledXrplFeeDrops: z.string().regex(/^\d+$/).default("10"), replayIntervalMs: z.coerce.number().int().min(0).default(0),
   usdToQuoteRate: decimalSetting("1"),
   spreadBps: decimalSetting("30"), quoteSize: decimalSetting("5"), maxInventory: decimalSetting("50"), maxDailyLoss: decimalSetting("25"),
   offerLifetimeLedgers: z.coerce.number().int().positive().default(1),
   queueAheadBase: decimalSetting("5", true), queueAheadFraction: z.coerce.number().min(0).max(1).default(0.5), checkpointEveryLedgers: z.coerce.number().int().positive().default(20),
   port: z.coerce.number().int().min(1024).max(65535).default(3000), adminPort: z.coerce.number().int().min(1024).max(65535).default(3001), dataHistory: z.coerce.number().int().positive().default(500),
 }).strict().superRefine((value, ctx) => {
-  if (value.network === "mainnet" && value.source !== "mainnet") ctx.addIssue({ code: "custom", path: ["source"], message: "Mainnet is available only through the explicitly selected read-only mainnet source." });
+  if (value.network === "mainnet" && !["mainnet", "replay"].includes(value.source)) ctx.addIssue({ code: "custom", path: ["source"], message: "Mainnet is available only through the explicitly selected read-only mainnet source or recorded paper replay." });
   if (value.network === "testnet" && value.source === "mainnet") ctx.addIssue({ code: "custom", path: ["network"], message: "SOURCE=mainnet requires NETWORK=mainnet." });
   if (value.model === "jev" && !process.env.TYPESAFE_AI_API_KEY?.trim()) ctx.addIssue({ code: "custom", path: ["model"], message: "MODEL=jev requires TYPESAFE_AI_API_KEY in the process environment. Set it in your untracked local .env; the key is never stored in the paper session." });
   if (value.source === "replay" && !value.replayPath) ctx.addIssue({ code: "custom", path: ["replayPath"], message: "REPLAY_PATH is required when SOURCE=replay." });
@@ -48,7 +48,7 @@ export const config = parseConfig({
   base: currency(process.env.BASE_CURRENCY, process.env.BASE_ISSUER), quote: currency(process.env.QUOTE_CURRENCY, process.env.QUOTE_ISSUER),
   seed: process.env.SYNTHETIC_SEED, replayPath: process.env.REPLAY_PATH, wsUrl: process.env.XRPL_WS_URL, mainnetWsUrl: process.env.XRPL_MAINNET_WS_URL, dataDir: process.env.DATA_DIR,
   model: process.env.MODEL, jevModelId: process.env.JEV_MODEL_ID, jevTimeoutMs: process.env.JEV_TIMEOUT_MS, jevUsdPerMTok: process.env.JEV_USD_PER_MILLION_TOKENS,
-  modeledXrplFeeDrops: process.env.MODELED_XRPL_FEE_DROPS, usdToQuoteRate: process.env.USD_TO_QUOTE_RATE, spreadBps: process.env.SPREAD_BPS, quoteSize: process.env.QUOTE_SIZE,
+  modeledXrplFeeDrops: process.env.MODELED_XRPL_FEE_DROPS, replayIntervalMs: process.env.REPLAY_INTERVAL_MS, usdToQuoteRate: process.env.USD_TO_QUOTE_RATE, spreadBps: process.env.SPREAD_BPS, quoteSize: process.env.QUOTE_SIZE,
   offerLifetimeLedgers: process.env.OFFER_LIFETIME_LEDGERS,
   maxInventory: process.env.MAX_INVENTORY, maxDailyLoss: process.env.MAX_DAILY_LOSS, queueAheadBase: process.env.QUEUE_AHEAD_BASE, queueAheadFraction: process.env.QUEUE_AHEAD_FRACTION,
   checkpointEveryLedgers: process.env.CHECKPOINT_EVERY_LEDGERS, port: process.env.PORT, adminPort: process.env.ADMIN_PORT, dataHistory: process.env.DATA_HISTORY,

@@ -6,7 +6,7 @@ import type { CycleEvent } from "./types";
 export function useFeed(apiUrl: string) {
   const [events, setEvents] = useState<CycleEvent[]>([]);
   const [connection, setConnection] = useState<"connecting" | "live" | "reconnecting">("connecting");
-  const [marketConnection, setMarketConnection] = useState<"connecting" | "live" | "stale">("connecting");
+  const [marketConnection, setMarketConnection] = useState<"connecting" | "live" | "stale" | "replay">("connecting");
   useEffect(() => {
     let stopped = false;
     let retry = 0;
@@ -24,7 +24,7 @@ export function useFeed(apiUrl: string) {
         retryTimer = setTimeout(connect, delay);
       };
       source.addEventListener("snapshot", (message) => {
-        try { const value = JSON.parse((message as MessageEvent).data); if (Array.isArray(value.history)) setEvents(value.history.filter((item: any) => item.type === "cycle").slice(-500)); if (["connecting", "live", "stale"].includes(value.marketConnection)) setMarketConnection(value.marketConnection); }
+        try { const value = JSON.parse((message as MessageEvent).data); if (Array.isArray(value.history)) setEvents(value.history.filter((item: any) => item.type === "cycle").slice(-500)); if (["connecting", "live", "stale", "replay"].includes(value.marketConnection)) setMarketConnection(value.marketConnection); }
         catch { /* ignore malformed snapshots; a later reconnect requests another */ }
       });
       source.addEventListener("cycle", (message) => {
@@ -35,7 +35,7 @@ export function useFeed(apiUrl: string) {
           setEvents((current) => current.at(-1)?.eventId === event.eventId ? current : [...current, event].slice(-500));
         } catch { /* ignore invalid stream events */ }
       });
-      source.addEventListener("ping", (message) => { setConnection("live"); try { const value = JSON.parse((message as MessageEvent).data); if (["connecting", "live", "stale"].includes(value.marketConnection)) setMarketConnection(value.marketConnection); } catch { /* ignore heartbeat parsing errors */ } });
+      source.addEventListener("ping", (message) => { setConnection("live"); try { const value = JSON.parse((message as MessageEvent).data); if (["connecting", "live", "stale", "replay"].includes(value.marketConnection)) setMarketConnection(value.marketConnection); } catch { /* ignore heartbeat parsing errors */ } });
     };
     connect();
     return () => { stopped = true; source?.close(); clearTimeout(retryTimer); };

@@ -1,4 +1,4 @@
-export const EVENT_VERSION = 5 as const;
+export const EVENT_VERSION = 6 as const;
 export type Side = "buy" | "sell";
 export type Direction = "bullish" | "bearish" | "neutral";
 export type Toxicity = "low" | "medium" | "high";
@@ -25,6 +25,8 @@ export interface MarketEvent {
   executions: readonly ExecutableTrade[];
   unsupportedExecutions: readonly UnsupportedExecution[];
   source: "testnet" | "mainnet" | "synthetic" | "replay";
+  replayMarker?: boolean;
+  recordedProvenance?: { source: "mainnet" | "testnet"; network: "mainnet" | "testnet"; eventId: string; ledgerIndex: number; ledgerHash: string; receivedAt?: number };
   syntheticSeed?: string;
 }
 export interface MarketHistoryPoint { ledgerIndex: number; mid: Amount; buyFlow: Amount; sellFlow: Amount; spreadBps: Amount }
@@ -87,7 +89,7 @@ export interface Checkpoint {
   emergencyStop: boolean;
   strategies: Record<StrategyId, StrategyState>;
 }
-export interface SessionMeta { schemaVersion: typeof EVENT_VERSION; sessionId: string; startedAt: number; source: string; network?: "testnet" | "mainnet"; seed?: string; base: Currency; quote: Currency; assumptions: { spreadBps: Amount; quoteSize: Amount; maxInventory: Amount; maxDailyLoss: Amount; queueAheadBase: Amount; queueAheadFraction: number; offerLifetimeLedgers?: number; modeledXrplFeeDrops: Amount; jevUsdPerMTok: Amount; usdToQuoteRate: Amount; model: string; jevModelId: string } }
+export interface SessionMeta { schemaVersion: typeof EVENT_VERSION; sessionId: string; startedAt: number; source: string; network?: "testnet" | "mainnet"; seed?: string; replayHash?: string; replayIntervalMs?: number; base: Currency; quote: Currency; assumptions: { spreadBps: Amount; quoteSize: Amount; maxInventory: Amount; maxDailyLoss: Amount; queueAheadBase: Amount; queueAheadFraction: number; offerLifetimeLedgers?: number; modeledXrplFeeDrops: Amount; jevUsdPerMTok: Amount; usdToQuoteRate: Amount; model: string; jevModelId: string } }
 
 export interface StrategyContext {
   market: MarketEvent;

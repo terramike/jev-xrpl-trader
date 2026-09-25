@@ -44,23 +44,35 @@ export class SyntheticMarketDataSource implements MarketDataSource {
 export class ReplayMarketDataSource implements MarketDataSource {
   private stopped = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  constructor(private readonly resumeLedger = 0) {}
+  constructor(private readonly resumeLedger = 0, private readonly replayPath = config.replayPath!, private readonly intervalMs = config.replayIntervalMs, private readonly expectedNetwork: "mainnet" | "testnet" = config.network) {}
   async start(callback: (event: MarketEvent) => Promise<void> | void) {
-    const events = readFileSync(config.replayPath!, "utf8").split(/\r?\n/).filter(Boolean).map((line, index) => {
-      const value = JSON.parse(line);
-      if (value.schemaVersion !== EVENT_VERSION || value.type !== "market" || !Number.isInteger(value.ledgerIndex)) throw new Error(`Replay line ${index + 1} is not a version ${EVENT_VERSION} market event.`);
-      return deepFreeze(value as MarketEvent);
-    });
+    const events = readReplayMarketEvents(readFileSync(this.replayPath, "utf8"), this.expectedNetwork);
     let i = events.findIndex((event) => event.ledgerIndex > this.resumeLedger);
     if (i < 0) return;
     const tick = async () => {
       if (this.stopped || i >= events.length) return;
       await callback(events[i++]!);
-      this.timer = setTimeout(() => void tick(), 4_000);
+      if (!this.stopped && i < events.length) this.timer = setTimeout(() => void tick(), this.intervalMs);
     };
     await tick();
   }
   async close() { this.stopped = true; if (this.timer) clearTimeout(this.timer); }
+}
+
+export function readReplayMarketEvents(contents: string, expectedNetwork: "mainnet" | "testnet" = config.network): MarketEvent[] {
+  const events = contents.split(/\r?\n/).filter(Boolean).flatMap((line, index) => {
+    let record: any;
+    try { record = JSON.parse(line); } catch { throw new Error(`Replay line ${index + 1} is not valid JSON.`); }
+    if (record.type === "control") return [];
+    const value = record.type === "cycle" ? record.market : record;
+    if (![5, EVENT_VERSION].includes(value?.schemaVersion) || value.type !== "market" || !Number.isInteger(value.ledgerIndex)) throw new Error(`Replay line ${index + 1} is not a supported version 5 or ${EVENT_VERSION} market event.`);
+    if (value.source !== expectedNetwork || typeof value.ledgerHash !== "string" || typeof value.eventId !== "string") throw new Error(`Replay line ${index + 1} does not match the selected ${expectedNetwork} network or lacks ledger provenance.`);
+    const original = value.recordedProvenance ?? { source: expectedNetwork, network: expectedNetwork, eventId: value.eventId, ledgerIndex: value.ledgerIndex, ledgerHash: value.ledgerHash, ...(Number.isFinite(value.receivedAt) ? { receivedAt: value.receivedAt } : {}) };
+    if (original.source !== expectedNetwork || original.network !== expectedNetwork || original.eventId !== value.eventId || original.ledgerIndex !== value.ledgerIndex || original.ledgerHash !== value.ledgerHash) throw new Error(`Replay line ${index + 1} contains inconsistent recorded-source provenance.`);
+    return [deepFreeze({ ...value, schemaVersion: EVENT_VERSION, replayMarker: true, recordedProvenance: original } as MarketEvent)];
+  });
+  for (let index = 1; index < events.length; index++) if (events[index]!.ledgerIndex <= events[index - 1]!.ledgerIndex) throw new Error(`Replay event order is invalid at market record ${index + 1}; Mainnet ledger indices must increase strictly.`);
+  return events;
 }
 
 export function syntheticSeedHash(seed: string) { return hashText(seed); }
