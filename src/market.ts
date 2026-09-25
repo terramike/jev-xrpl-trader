@@ -18,6 +18,12 @@ function sameAsset(value: any, target: Currency) {
 function positive(n: Decimal | null | undefined) { return !!n && n.isFinite() && n.gt(0); }
 
 export type TransactionExecutionResult = { trades: ExecutableTrade[]; unsupportedReason?: string };
+export function retryDelayForRateLimit(error: unknown, attempt: number): number | null {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!/too much load|rate.?limit|units quota/i.test(message)) return null;
+  const retry = message.match(/retry in ~?(\d+)\s*ms/i);
+  return retry ? Math.min(30_000, Math.max(1_000, Number(retry[1]))) : Math.min(30_000, 10_000 * 2 ** attempt);
+}
 /** Parse direct Offer-ledger deltas from validated OfferCreate or Payment metadata only. */
 export function executionsFromTransaction(input: any, base: Currency, quote: Currency): ExecutableTrade[] {
   return transactionExecutionResult(input, base, quote).trades;
@@ -66,10 +72,12 @@ export function transactionExecutionResult(input: any, base: Currency, quote: Cu
 export class XrplMarketDataSource implements MarketDataSource {
   private client = new Client(config.network === "mainnet" ? config.mainnetWsUrl : config.wsUrl, { connectionTimeout: 15_000 });
   private callback: ((event: MarketEvent) => Promise<void> | void) | null = null;
-  private lastLedger = 0;
+  private lastLedger: number;
   private closed = false;
   private queue: Promise<void> = Promise.resolve();
   private paused = false;
+
+  constructor(lastLedger = 0) { this.lastLedger = lastLedger; }
 
   async start(onEvent: (event: MarketEvent) => Promise<void> | void) {
     this.callback = onEvent;
@@ -88,7 +96,7 @@ export class XrplMarketDataSource implements MarketDataSource {
     // Reconcile every missed index via validated expanded ledger contents. Failed/gapped reads fail closed.
     const first = this.lastLedger ? this.lastLedger + 1 : targetIndex;
     for (let index = first; index <= targetIndex; index++) {
-      const ledgerResult = await this.client.request({ command: "ledger", ledger_index: index, transactions: true, expand: true });
+      const ledgerResult = await this.requestWithRateLimitRetry({ command: "ledger", ledger_index: index, transactions: true, expand: true });
       const ledger = ledgerResult.result;
       if (!ledger.validated || ledger.ledger_index !== index || !ledger.ledger_hash) throw new Error(`ledger ${index} was not returned as the requested validated ledger`);
       const txs: any[] = ledger.ledger?.transactions ?? [];
@@ -96,17 +104,16 @@ export class XrplMarketDataSource implements MarketDataSource {
       const parsed = txs.map((entry) => ({ entry, result: transactionExecutionResult({ ...entry, validated: true }, config.base, config.quote) }));
       const executions = parsed.flatMap(({ result }) => result.trades);
       const unsupportedExecutions = parsed.flatMap(({ entry, result }) => result.unsupportedReason ? [{ sourceTx: String(entry.tx_json?.hash ?? entry.hash ?? "unknown"), transactionType: String(entry.tx_json?.TransactionType ?? entry.transaction?.TransactionType ?? "unknown"), reason: result.unsupportedReason }] : []);
-      const [asksResult, bidsResult] = await Promise.all([
-        this.client.request({ command: "book_offers", taker_gets: currencyParam(config.base), taker_pays: currencyParam(config.quote), ledger_index: index, limit: 100 }),
-        this.client.request({ command: "book_offers", taker_gets: currencyParam(config.quote), taker_pays: currencyParam(config.base), ledger_index: index, limit: 100 }),
-      ]);
+      const asksResult = await this.requestWithRateLimitRetry({ command: "book_offers", taker_gets: currencyParam(config.base), taker_pays: currencyParam(config.quote), ledger_index: index, limit: 100 });
+      const bidsResult = await this.requestWithRateLimitRetry({ command: "book_offers", taker_gets: currencyParam(config.quote), taker_pays: currencyParam(config.base), ledger_index: index, limit: 100 });
       const asks = levels(asksResult.result.offers, "ask");
       const bids = levels(bidsResult.result.offers, "bid");
       if (!asks.length || !bids.length || bids[0]!.price >= asks[0]!.price) throw new Error(`ledger ${index} returned an empty or crossed book`);
       const hash = String(ledger.ledger_hash ?? (index === targetIndex ? latestHeader.ledger_hash ?? latestHeader.ledgerHash : ""));
       if (!hash) throw new Error(`ledger ${index} has no hash`);
+      const ledgerCloseTimestamp = parseLedgerCloseTimestamp(ledger.ledger);
       const event: MarketEvent = Object.freeze({
-        schemaVersion: EVENT_VERSION, eventId: `xrpl:${hash}`, type: "market", timestamp: Date.now(), ledgerIndex: index, ledgerHash: hash,
+        schemaVersion: EVENT_VERSION, eventId: `xrpl:${hash}`, type: "market", timestamp: ledgerCloseTimestamp, receivedAt: Date.now(), ledgerCloseTimestamp, ledgerIndex: index, ledgerHash: hash,
         base: Object.freeze({ ...config.base }), quote: Object.freeze({ ...config.quote }),
         bids: Object.freeze(bids.map((level) => Object.freeze(level))), asks: Object.freeze(asks.map((level) => Object.freeze(level))),
         executions: Object.freeze(executions.map((trade) => Object.freeze(trade))), unsupportedExecutions: Object.freeze(unsupportedExecutions.map((item) => Object.freeze(item))), source: config.network,
@@ -116,7 +123,28 @@ export class XrplMarketDataSource implements MarketDataSource {
     }
   }
 
+  private async requestWithRateLimitRetry(request: any): Promise<any> {
+    for (let attempt = 0; ; attempt++) {
+      try { return await this.client.request(request); }
+      catch (error) {
+        if (this.closed) throw error;
+        const waitMs = retryDelayForRateLimit(error, attempt);
+        if (waitMs === null || attempt >= 4) throw error;
+        console.warn(`${config.network} feed rate limited; retrying the same read-only request in ${waitMs}ms`);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+      }
+    }
+  }
+
   async close() { this.closed = true; await this.queue; if (this.client.isConnected()) await this.client.disconnect(); }
+}
+
+export function parseLedgerCloseTimestamp(ledger: any) {
+  const iso = typeof ledger?.close_time_iso === "string" ? Date.parse(ledger.close_time_iso) : NaN;
+  if (Number.isFinite(iso)) return iso;
+  const rippleEpochSeconds = Number(ledger?.close_time);
+  if (Number.isFinite(rippleEpochSeconds) && rippleEpochSeconds > 0) return (rippleEpochSeconds + 946_684_800) * 1000;
+  throw new Error("validated ledger has no parseable close timestamp");
 }
 
 function levels(offers: any[], side: "ask" | "bid"): BookLevel[] {

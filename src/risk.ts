@@ -4,7 +4,7 @@ import type { MarketEvent, Offer, StrategyState } from "./types";
 export interface RiskLimits { maxInventory: string; maxDailyLoss: string; quoteSize: string }
 export class DeterministicRiskPolicy {
   update(state: StrategyState, market: MarketEvent, limits: RiskLimits) {
-    const day = new Date(market.timestamp).toISOString().slice(0, 10);
+    const day = new Date(market.ledgerCloseTimestamp ?? market.timestamp).toISOString().slice(0, 10);
     if (state.risk.day !== day) { state.risk.day = day; state.risk.dailyRealizedLoss = "0"; }
     if (!state.risk.stopped && d(state.risk.dailyRealizedLoss).gte(limits.maxDailyLoss)) {
       state.risk.stopped = true;

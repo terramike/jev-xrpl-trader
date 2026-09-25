@@ -22,7 +22,7 @@ export function startServers(trader: Trader, meta: Record<string, unknown>, toke
     const cors: Record<string, string> = origin && allowedOrigins.has(origin) ? { "access-control-allow-origin": origin, "vary": "origin" } : {};
     if (req.method === "OPTIONS") return new Response(null, { headers: { ...cors, "access-control-allow-methods": "GET, OPTIONS", "access-control-allow-headers": "content-type" } });
     if (req.method === "GET" && ["/", "/status"].includes(pathname)) return json({ ...trader.status, ...meta }, 200, cors);
-    if (req.method === "GET" && pathname === "/report") return json(trader.report, 200, cors);
+    if (req.method === "GET" && pathname === "/report") return json({ ...trader.report, ...meta }, 200, cors);
     if (req.method === "GET" && pathname === "/history") return json(trader.history, 200, cors);
     if (req.method === "GET" && pathname === "/events") {
       const stream = new ReadableStream<Uint8Array>({ start(controller) { clients.add(controller); controller.enqueue(enc.encode(`event: snapshot\ndata: ${JSON.stringify({ ...trader.status, ...meta, history: trader.history })}\n\n`)); }, cancel(controller) { clients.delete(controller); } });
@@ -35,7 +35,7 @@ export function startServers(trader: Trader, meta: Record<string, unknown>, toke
     if (req.headers.get("host") !== `127.0.0.1:${config.adminPort}`) return json({ error: "loopback host required" }, 403);
     if (req.headers.get("authorization") !== `Bearer ${token}`) return json({ error: "unauthorized" }, 401);
     if (req.method === "GET" && pathname === "/status") return json(trader.status);
-    if (req.method === "GET" && pathname === "/report") return json(trader.report);
+    if (req.method === "GET" && pathname === "/report") return json({ ...trader.report, ...meta });
     const actions: Record<string, ControlEvent["action"]> = { "/admin/stop": "stop", "/admin/cancel-all": "cancel-all", "/admin/reset-stop": "reset-stop" };
     if (req.method === "POST" && actions[pathname]) return json(trader.control(actions[pathname]!));
     return json({ error: "not found" }, 404);

@@ -5,6 +5,23 @@ import type { JevAssessment, MarketEvent, MarketHistoryPoint } from "./types";
 
 export interface DecisionModel { assess(event: MarketEvent, history?: readonly MarketHistoryPoint[]): Promise<JevAssessment> }
 
+export class JevAssessmentValidationError extends Error {
+  constructor(message: string) { super(message); this.name = "JevAssessmentValidationError"; }
+}
+
+export class JevTimeoutError extends Error {
+  constructor() { super("Jev assessment timed out"); this.name = "JevTimeoutError"; }
+}
+
+/** TypeSafe AI exposes its calibrated confidence separately from the choice probabilities. */
+export function requireDirectionConfidence(result: unknown): number {
+  const confidence = (result as any)?.providerMetadata?.typesafe?.confidence?.direction;
+  if (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+    throw new JevAssessmentValidationError("Jev returned missing or invalid direction confidence");
+  }
+  return confidence;
+}
+
 const QUESTIONS = {
   direction: { type: "choice", instructions: { question: "Over the next several validated ledgers, is price direction bullish, bearish, or neutral?", goal: "Classify direction only for passive quoting. Do not propose a transaction, price, or size.", inputs: "Use the exact configured XRP/issued-currency pair, book imbalance, spread, validated direct offer executions, and current book levels." }, criteria: { bullish: "Evidence favors a higher midpoint.", bearish: "Evidence favors a lower midpoint.", neutral: "Evidence does not favor either direction." } },
   toxicity: { type: "choice", instructions: { question: "How toxic is this market for a passive quote?", goal: "High toxicity means market makers should withdraw.", inputs: "Consider spread, book depth, and validated direct-offer execution flow." }, criteria: { low: "Conditions appear orderly.", medium: "Conditions are mixed or less stable.", high: "Adverse selection risk appears elevated." } },
@@ -33,10 +50,9 @@ export class JevModel implements DecisionModel {
     const direction = (result.answers.direction as any)?.choice;
     const toxicity = (result.answers.toxicity as any)?.choice;
     const volatility = (result.answers.volatility as any)?.choice;
-    const probabilities = (result.answers.direction as any)?.probabilities ?? {};
-    const confidence = Math.max(Number(probabilities.bullish ?? 0), Number(probabilities.bearish ?? 0), Number(probabilities.neutral ?? 0));
-    if (!["bullish", "bearish", "neutral"].includes(direction) || !["low", "medium", "high"].includes(toxicity) || !["calm", "normal", "extreme"].includes(volatility)) throw new Error("Jev returned an invalid typed assessment");
-    return { direction, toxicity, volatility, confidence: Math.max(0, Math.min(1, confidence)), latencyMs: performance.now() - started, inputTokens: result.usage?.inputTokens ?? 0 };
+    const confidence = requireDirectionConfidence(result);
+    if (!["bullish", "bearish", "neutral"].includes(direction) || !["low", "medium", "high"].includes(toxicity) || !["calm", "normal", "extreme"].includes(volatility)) throw new JevAssessmentValidationError("Jev returned an invalid typed assessment");
+    return { direction, toxicity, volatility, confidence, latencyMs: performance.now() - started, inputTokens: result.usage?.inputTokens ?? 0 };
   }
 }
 
@@ -65,6 +81,6 @@ export class MockModel implements DecisionModel {
 
 export function createModel(): DecisionModel { return config.model === "jev" ? new JevModel() : new MockModel(); }
 export function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return Promise.race([promise, new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Jev assessment timed out")), timeoutMs))]);
+  return Promise.race([promise, new Promise<T>((_, reject) => setTimeout(() => reject(new JevTimeoutError()), timeoutMs))]);
 }
 function spreadBps(event: MarketEvent) { const bid = Number(event.bids[0]?.price), ask = Number(event.asks[0]?.price); const mid = bid && ask ? (bid + ask) / 2 : 0; return mid ? ((ask - bid) / mid) * 10_000 : Infinity; }

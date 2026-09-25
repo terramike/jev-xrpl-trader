@@ -14,7 +14,7 @@ process.env.QUOTE_ISSUER = "rrrrrrrrrrrrrrrrrrrrBZbvji";
 process.env.PORT = String(31_000 + process.pid % 2_000);
 process.env.ADMIN_PORT = String(33_000 + process.pid % 2_000);
 
-const [{ config, parseConfig, assertNoSigningCredentials }, { SyntheticMarketDataSource }, { PaperExecutor }, { initialStrategyState, initialStrategies, AuditStore, assertFreshMainnetDataDir }, { Trader }, { startServers }, { executionsFromTransaction, transactionExecutionResult }] = await Promise.all([
+const [{ config, parseConfig, assertNoSigningCredentials }, { SyntheticMarketDataSource }, { PaperExecutor }, { initialStrategyState, initialStrategies, AuditStore, assertFreshMainnetDataDir }, { Trader }, { startServers }, { executionsFromTransaction, transactionExecutionResult, retryDelayForRateLimit, parseLedgerCloseTimestamp }] = await Promise.all([
   import("../src/config"), import("../src/sources"), import("../src/execution/paper"), import("../src/storage"), import("../src/trader"), import("../src/server"), import("../src/market"),
 ]);
 
@@ -22,8 +22,34 @@ const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function tempDir() { const dir = mkdtempSync(join(tmpdir(), "jev-paper-")); dirs.push(dir); return dir; }
 function marketEvent(ledgerIndex: number, executions: any[] = [], source: "synthetic" | "testnet" = "synthetic") {
-  return Object.freeze({ schemaVersion: 3 as const, eventId: `${source}:${ledgerIndex}`, type: "market" as const, timestamp: source === "testnet" ? Date.now() : 1_700_000_000_000 + ledgerIndex * 4_000, ledgerIndex, ledgerHash: `hash-${ledgerIndex}`, base: Object.freeze({ currency: "XRP" }), quote: Object.freeze({ currency: "USD", issuer: "rrrrrrrrrrrrrrrrrrrrBZbvji" }), bids: Object.freeze([{ price: "0.4995", baseVolume: "20" }]), asks: Object.freeze([{ price: "0.5005", baseVolume: "20" }]), executions: Object.freeze(executions.map((trade) => ({ ...trade, price: String(trade.price), baseVolume: String(trade.baseVolume) }))), unsupportedExecutions: Object.freeze([]), source, ...(source === "synthetic" ? { syntheticSeed: "unit-test" } : {}) });
+  return Object.freeze({ schemaVersion: 5 as const, eventId: `${source}:${ledgerIndex}`, type: "market" as const, timestamp: source === "testnet" ? Date.now() : 1_700_000_000_000 + ledgerIndex * 4_000, ledgerIndex, ledgerHash: `hash-${ledgerIndex}`, base: Object.freeze({ currency: "XRP" }), quote: Object.freeze({ currency: "USD", issuer: "rrrrrrrrrrrrrrrrrrrrBZbvji" }), bids: Object.freeze([{ price: "0.4995", baseVolume: "20" }]), asks: Object.freeze([{ price: "0.5005", baseVolume: "20" }]), executions: Object.freeze(executions.map((trade) => ({ ...trade, price: String(trade.price), baseVolume: String(trade.baseVolume) }))), unsupportedExecutions: Object.freeze([]), source, ...(source === "synthetic" ? { syntheticSeed: "unit-test" } : {}) });
 }
+
+describe("TypeSafe confidence", () => {
+  test("uses separate provider confidence instead of the largest choice probability", async () => {
+    const { requireDirectionConfidence } = await import("../src/model");
+    expect(requireDirectionConfidence({ answers: { direction: { probabilities: { bullish: 0.99 } } }, providerMetadata: { typesafe: { confidence: { direction: 0.37 } } } })).toBe(0.37);
+  });
+  test("rejects missing, non-finite and out-of-range confidence", async () => {
+    const { requireDirectionConfidence } = await import("../src/model");
+    for (const value of [undefined, NaN, Infinity, -0.01, 1.01]) {
+      expect(() => requireDirectionConfidence({ providerMetadata: { typesafe: { confidence: { direction: value } } } })).toThrow("missing or invalid direction confidence");
+    }
+  });
+});
+
+describe("XRPL feed backoff", () => {
+  test("honors a server rate-limit retry interval and ignores ordinary read errors", () => {
+    expect(retryDelayForRateLimit(new Error("rate limit: units quota exhausted, retry in ~7564ms"), 0)).toBe(7564);
+    expect(retryDelayForRateLimit(new Error("You are placing too much load on the server."), 1)).toBe(20_000);
+    expect(retryDelayForRateLimit(new Error("empty book"), 0)).toBeNull();
+  });
+  test("uses the ledger's close time, including the Ripple epoch fallback", () => {
+    expect(parseLedgerCloseTimestamp({ close_time_iso: "2026-09-24T18:00:00Z" })).toBe(Date.parse("2026-09-24T18:00:00Z"));
+    expect(parseLedgerCloseTimestamp({ close_time: 819429112 })).toBe((819429112 + 946_684_800) * 1000);
+    expect(() => parseLedgerCloseTimestamp({})).toThrow("no parseable close timestamp");
+  });
+});
 
 describe("paper configuration", () => {
   test("preserves the existing paper/Testnet defaults", () => {
@@ -199,7 +225,7 @@ describe("recovery, risk and administration", () => {
     await trader.onMarket(marketEvent(1));
     const decisions = trader.report.strategies[0]!.decisions;
     await trader.onMarket(marketEvent(1));
-    await trader.onMarket({ ...marketEvent(2), schemaVersion: 4 } as any);
+    await trader.onMarket({ ...marketEvent(2), schemaVersion: 3 } as any);
     await trader.onMarket({ ...marketEvent(3, [], "testnet"), timestamp: Date.now() - 30_000 });
     expect(trader.report.strategies[0]!.decisions).toBe(decisions);
     trader.control("stop");
@@ -234,7 +260,7 @@ describe("recovery, risk and administration", () => {
     strategies.baseline.xrplFeeDrops = "900719925474099312345";
     strategies.baseline.risk.dailyRealizedLoss = "0.00000000000000000000003";
     strategies.baseline.offers = [{ id: "persisted", side: "buy", price: "0.000000000000000001", remaining: "0.000000000000000002", queueRemaining: "0.000000000000000003", placedLedger: 1, eligibleLedger: 2, expiresLedger: 3 }];
-    store.checkpoint({ schemaVersion: 3, lastEventId: "cycle:test", lastLedgerIndex: 1, lastMid: "0.0000000000000000001", emergencyStop: true, strategies });
+    store.checkpoint({ schemaVersion: 3, lastEventId: "cycle:test", lastLedgerIndex: 1, lastMid: "0.0000000000000000001", emergencyStop: true, strategies } as any);
     const restored = store.recover()!;
     expect(restored.strategies.baseline.inventory).toBe("0.0000000000000000015");
     expect(restored.strategies.baseline.realizedPnl).toBe("0.00000000000000000000017");
@@ -243,14 +269,68 @@ describe("recovery, risk and administration", () => {
     expect(restored.strategies.baseline.risk.dailyRealizedLoss).toBe("0.00000000000000000000003");
     expect(restored.emergencyStop).toBe(true);
   });
+  test("migrates v4 state to v5 without losing trading state and restarts old timing analytics", () => {
+    const store = new AuditStore(tempDir()), strategies = initialStrategies();
+    strategies.jev.inventory = "-3.25"; strategies.jev.realizedPnl = "0.75"; strategies.jev.risk.stopped = true; strategies.jev.risk.reason = "daily loss";
+    strategies.jev.timeHoldingXrpMs = 99_000; strategies.jev.xrpExposureMs = "12345"; strategies.jev.quoteTurnoverQuote = "9.5"; strategies.jev.peakShortInventory = "7";
+    strategies.jev.offers = [{ id: "saved-v4", side: "sell", price: "0.5", remaining: "1", queueRemaining: "2", placedLedger: 5, eligibleLedger: 6, expiresLedger: 7 }];
+    store.checkpoint({ schemaVersion: 4, lastEventId: "cycle:v4", lastLedgerIndex: 5, lastMid: "0.5", emergencyStop: true, strategies } as any);
+    const recovered = store.recover()!;
+    expect(recovered.strategies.jev.inventory).toBe("-3.25");
+    expect(recovered.strategies.jev.realizedPnl).toBe("0.75");
+    expect(recovered.strategies.jev.risk.stopped).toBe(true);
+    expect(recovered.strategies.jev.offers[0]?.id).toBe("saved-v4");
+    expect(recovered.strategies.jev.timeHoldingXrpMs).toBe(0);
+    expect(recovered.strategies.jev.xrpExposureMs).toBe("0");
+    expect(recovered.strategies.jev.quoteTurnoverQuote).toBe("0");
+    expect(recovered.strategies.jev.peakShortInventory).toBe("3.25");
+    expect(recovered.emergencyStop).toBe(true);
+  });
   test("Jev timeout withholds only Jev strategy exposure", async () => {
-    const trader = new Trader({ assess: async () => { throw new Error("offline"); } }, new AuditStore(tempDir()));
+    const trader = new Trader({ assess: async () => new Promise<any>(() => {}) }, new AuditStore(tempDir()));
     await trader.onMarket(marketEvent(1));
     const report = trader.report.strategies;
     expect(report.find((strategy) => strategy.id === "baseline")!.openOffers).toBe(2);
     expect(report.find((strategy) => strategy.id === "control")!.openOffers).toBe(2);
     expect(report.find((strategy) => strategy.id === "jev")!.openOffers).toBe(0);
-    expect(trader.status.strategies.find((strategy) => strategy.id === "jev")!.state.lastDecision.reason).toBe("Jev assessment unavailable; quote withheld");
+    expect(report.find((strategy) => strategy.id === "jev")!.assessmentTimeouts).toBe(1);
+    expect(trader.status.strategies.find((strategy) => strategy.id === "jev")!.state.lastDecision.reason).toBe("Jev assessment timeout; quotes withheld");
+  });
+  test("invalid Jev confidence is an abstention and does not count as a timeout", async () => {
+    const { JevAssessmentValidationError } = await import("../src/model");
+    const trader = new Trader({ assess: async () => { throw new JevAssessmentValidationError("Jev returned missing or invalid direction confidence"); } }, new AuditStore(tempDir()));
+    await trader.onMarket(marketEvent(1));
+    const jev = trader.report.strategies.find((strategy) => strategy.id === "jev")!;
+    expect(jev.openOffers).toBe(0);
+    expect(jev.assessmentTimeouts).toBe(0);
+    expect(jev.assessmentFailures).toBe(1);
+    expect(jev.abstentionReasons).toEqual({ "Jev invalid or missing direction confidence; quotes withheld": 1 });
+  });
+  test("accepts a freshly received backfill ledger for audit but withholds quotes when its ledger time is stale", async () => {
+    const trader = new Trader({ assess: async () => ({ direction: "neutral", toxicity: "low", volatility: "calm", confidence: 0.5, latencyMs: 0, inputTokens: 0 }) }, new AuditStore(tempDir()));
+    const staleLedgerTime = Date.now() - 60_000;
+    await trader.onMarket({ ...marketEvent(1, [], "testnet"), timestamp: staleLedgerTime, receivedAt: Date.now(), ledgerCloseTimestamp: staleLedgerTime });
+    expect(trader.report.observation.ledgersProcessed).toBe(1);
+    expect(trader.status.marketConnection).toBe("stale");
+    expect(trader.status.strategies.every((strategy) => strategy.state.offers.length === 0)).toBe(true);
+    expect(trader.status.strategies.every((strategy) => strategy.state.lastDecision.reason === "validated ledger data is stale; new quotes withheld")).toBe(true);
+  });
+  test("reports inventory holding time, peak XRP inventory, quote turnover and visible net-cost assumptions", async () => {
+    const trader = new Trader({ assess: async () => ({ direction: "neutral", toxicity: "low", volatility: "calm", confidence: 0.5, latencyMs: 0, inputTokens: 0 }) }, new AuditStore(tempDir()));
+    const closeBase = Date.now() - 15_000;
+    const event = (index: number, executions: any[] = []) => ({ ...marketEvent(index, executions, "testnet"), timestamp: closeBase + index * 4_000, receivedAt: Date.now(), ledgerCloseTimestamp: closeBase + index * 4_000 });
+    await trader.onMarket(event(1));
+    await trader.onMarket(event(2, [{ side: "sell", price: "0.49", baseVolume: "100", sourceTx: "fill-hash" }]));
+    await trader.onMarket(event(3));
+    const report = trader.report;
+    const baseline = report.strategies.find((strategy) => strategy.id === "baseline")!;
+    expect(baseline.peakLongXrp).toBe("5");
+    expect(baseline.timeHoldingXrpMs).toBe(4_000);
+    expect(report.metricCoverage.analyticsStartedAt).toBe(closeBase + 4_000);
+    expect(Number(baseline.quoteTurnoverBaseXrp)).toBeGreaterThan(0);
+    expect(Number(baseline.quoteTurnoverQuote)).toBeGreaterThan(0);
+    expect(baseline.netAfterModeledCostsQuote).not.toBeNull();
+    expect(report.costConversionAssumptions.usdToQuoteRate.method).toContain("configured paper assumption");
   });
   test("records the Jev assessment and exact abstention gates in the per-ledger quote decision", async () => {
     const assessment = { direction: "bearish" as const, toxicity: "high" as const, volatility: "extreme" as const, confidence: 1, latencyMs: 0, inputTokens: 0 };
@@ -268,8 +348,8 @@ describe("recovery, risk and administration", () => {
   test("records eligible volume, quote decisions, unsupported cases and detailed fill evidence in each cycle", async () => {
     const store = new AuditStore(tempDir()), strategies = initialStrategies();
     strategies.baseline.offers = [{ id: "resting", side: "buy", price: "0.5", remaining: "2", queueRemaining: "0", placedLedger: 1, eligibleLedger: 2, expiresLedger: 5 }];
-    store.append({ schemaVersion: 3, eventId: "control:prior", type: "control", timestamp: 1, action: "reset-stop", emergencyStop: false, strategies });
-    store.checkpoint({ schemaVersion: 3, lastEventId: "control:prior", lastLedgerIndex: 1, lastMid: "0.5", emergencyStop: false, strategies });
+    store.append({ schemaVersion: 3, eventId: "control:prior", type: "control", timestamp: 1, action: "reset-stop", emergencyStop: false, strategies } as any);
+    store.checkpoint({ schemaVersion: 3, lastEventId: "control:prior", lastLedgerIndex: 1, lastMid: "0.5", emergencyStop: false, strategies } as any);
     const trader = new Trader({ assess: async () => ({ direction: "neutral", toxicity: "low", volatility: "calm", confidence: 0.5, latencyMs: 1, inputTokens: 10 }) }, store);
     const event = marketEvent(2, [{ side: "sell", price: "0.49", baseVolume: "3", sourceTx: "validated-source-tx" }]);
     const market = { ...event, unsupportedExecutions: [{ sourceTx: "unmatched-tx", transactionType: "Payment", reason: "payment-without-direct-target-offer-delta" }] };
@@ -281,6 +361,10 @@ describe("recovery, risk and administration", () => {
     expect(cycle.fills).toHaveLength(1);
     expect(cycle.fills[0]).toMatchObject({ side: "buy", baseVolume: "2", sourceTx: "validated-source-tx", executionPrice: "0.49", queueVolumeConsumed: "0" });
     expect(cycle.fills[0].qualification).toContain("validated direct offer execution");
+    expect(trader.report.observation.fillEvidence[0]).toMatchObject({ ledgerHash: "hash-2", sourceTx: "validated-source-tx", qualification: expect.stringContaining("validated direct offer execution") });
+    expect(trader.report.observation.eligibleDirectOfferVolume.total).toBe("3");
+    expect(trader.report.observation.unsupportedExecutionsByCategory["Payment:payment-without-direct-target-offer-delta"]).toBe(1);
+    expect(trader.report.observation.unsupportedExamplesByCategory["Payment:payment-without-direct-target-offer-delta"][0]).toEqual({ ledgerIndex: 2, transactionHashRedacted: "unmatched-tx" });
   });
   test("admin operations require the local bearer token and stop persists", async () => {
     const dir = tempDir(), store = new AuditStore(dir);

@@ -36,6 +36,7 @@ export class PaperExecutor implements Executor {
   }
 
   place(state: StrategyState, offers: Offer[], modeledFeeDrops: string) {
+    const originalOffers = [...state.offers];
     const retained = new Set<Offer>();
     const next: Offer[] = [];
     for (const desired of offers) {
@@ -45,6 +46,13 @@ export class PaperExecutor implements Executor {
     }
     const canceled = state.offers.filter((offer) => !retained.has(offer));
     const created = next.filter((offer) => !retained.has(offer));
+    const replacements = created.filter((offer) => originalOffers.some((old) => old.side === offer.side)).length;
+    state.quoteCreateCount += created.length - replacements;
+    state.quoteReplacementCount += replacements;
+    for (const offer of created) {
+      state.quoteTurnoverBaseXrp = d(state.quoteTurnoverBaseXrp).plus(offer.remaining).toString();
+      state.quoteTurnoverQuote = d(state.quoteTurnoverQuote).plus(d(offer.price).times(offer.remaining)).toString();
+    }
     this.recordCancels(state, canceled.length, modeledFeeDrops);
     this.recordCreates(state, created.length, modeledFeeDrops);
     state.offers = next;
@@ -55,7 +63,7 @@ export class PaperExecutor implements Executor {
     state.offers = [];
   }
   private recordCreates(state: StrategyState, count: number, feeDrops: string) { state.modeledOfferCreates += count; state.xrplFeeDrops = (BigInt(state.xrplFeeDrops) + BigInt(feeDrops) * BigInt(count)).toString(); }
-  private recordCancels(state: StrategyState, count: number, feeDrops: string) { state.modeledOfferCancels += count; state.xrplFeeDrops = (BigInt(state.xrplFeeDrops) + BigInt(feeDrops) * BigInt(count)).toString(); }
+  private recordCancels(state: StrategyState, count: number, feeDrops: string) { state.modeledOfferCancels += count; state.quoteCancellationCount += count; state.xrplFeeDrops = (BigInt(state.xrplFeeDrops) + BigInt(feeDrops) * BigInt(count)).toString(); }
 }
 
 function applyPosition(state: StrategyState, side: Side, price: Decimal, size: Decimal) {
@@ -73,6 +81,8 @@ function applyPosition(state: StrategyState, side: Side, price: Decimal, size: D
     if (size.eq(old.abs())) state.averageEntryPrice = "0";
   }
   state.inventory = old.plus(signed).toString();
+  if (d(state.inventory).gt(0)) state.peakLongInventory = Decimal.max(d(state.peakLongInventory), d(state.inventory)).toString();
+  if (d(state.inventory).lt(0)) state.peakShortInventory = Decimal.max(d(state.peakShortInventory), d(state.inventory).abs()).toString();
   if (d(state.inventory).isZero()) state.averageEntryPrice = "0";
 }
 

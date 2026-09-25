@@ -1,4 +1,4 @@
-export const EVENT_VERSION = 3 as const;
+export const EVENT_VERSION = 5 as const;
 export type Side = "buy" | "sell";
 export type Direction = "bullish" | "bearish" | "neutral";
 export type Toxicity = "low" | "medium" | "high";
@@ -14,6 +14,8 @@ export interface MarketEvent {
   eventId: string;
   type: "market";
   timestamp: number;
+  receivedAt?: number;
+  ledgerCloseTimestamp?: number;
   ledgerIndex: number;
   ledgerHash: string;
   base: Currency;
@@ -41,8 +43,21 @@ export interface StrategyState {
   jevCostUsd: Amount;
   jevCalls: number;
   jevTimeouts: number;
+  jevFailures: number;
   jevLatencyTotalMs: number;
   jevInputTokens: number;
+  jevAbstentions: Record<string, number>;
+  peakLongInventory: Amount;
+  peakShortInventory: Amount;
+  timeHoldingXrpMs: number;
+  xrpExposureMs: Amount;
+  lastInventoryTimestamp: number | null;
+  analyticsStartedAt: number | null;
+  quoteCreateCount: number;
+  quoteReplacementCount: number;
+  quoteCancellationCount: number;
+  quoteTurnoverBaseXrp: Amount;
+  quoteTurnoverQuote: Amount;
   risk: RiskState;
   decisions: number;
   fills: number;
@@ -72,7 +87,7 @@ export interface Checkpoint {
   emergencyStop: boolean;
   strategies: Record<StrategyId, StrategyState>;
 }
-export interface SessionMeta { schemaVersion: typeof EVENT_VERSION; sessionId: string; startedAt: number; source: string; network?: "testnet" | "mainnet"; seed?: string; base: Currency; quote: Currency; assumptions: { spreadBps: Amount; quoteSize: Amount; maxInventory: Amount; maxDailyLoss: Amount; queueAheadBase: Amount; queueAheadFraction: number; offerLifetimeLedgers?: number; modeledXrplFeeDrops: Amount; jevUsdPerMTok: Amount; model: string; jevModelId: string } }
+export interface SessionMeta { schemaVersion: typeof EVENT_VERSION; sessionId: string; startedAt: number; source: string; network?: "testnet" | "mainnet"; seed?: string; base: Currency; quote: Currency; assumptions: { spreadBps: Amount; quoteSize: Amount; maxInventory: Amount; maxDailyLoss: Amount; queueAheadBase: Amount; queueAheadFraction: number; offerLifetimeLedgers?: number; modeledXrplFeeDrops: Amount; jevUsdPerMTok: Amount; usdToQuoteRate: Amount; model: string; jevModelId: string } }
 
 export interface StrategyContext {
   market: MarketEvent;
